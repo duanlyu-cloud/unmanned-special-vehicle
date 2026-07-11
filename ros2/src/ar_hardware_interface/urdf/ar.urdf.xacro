@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+  <xacro:arg name="serial_port" default="/dev/ttyACM0"/>
+  <xacro:arg name="calibrate" default="True"/>
+  <xacro:include filename="$(find ar_description)/urdf/ar_macro.xacro"/>
+  <xacro:include filename="$(find ar_description)/urdf/ar.ros2_control.xacro"/>
+
+  <!-- initial position for simulations (Mock Hardware, Gazebo, Ignition) -->
+  <xacro:arg name="initial_positions_file" default="$(find ar_description)/config/initial_positions.yaml"/>
+
+  <!-- convert to property to use substitution in function -->
+  <xacro:property name="initial_positions_file" default="$(arg initial_positions_file)"/>
+  
+  <link name="world" />
+  <xacro:ar_robot parent="world">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </xacro:ar_robot>
+
+  <xacro:ar_ros2_control
+    name="$(arg name)"
+    plugin_name="ar_hardware_interface/ARHardwareInterface"
+    serial_port="$(arg serial_port)"
+    calibrate="$(arg calibrate)"
+  />
+</robot>

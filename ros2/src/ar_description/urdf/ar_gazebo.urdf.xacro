@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+  <xacro:include filename="$(find ar_description)/urdf/ar_macro.xacro"/>
+  <xacro:include filename="$(find ar_description)/urdf/ar.ros2_control.xacro"/>
+
+  <xacro:arg name="simulation_controllers" default="" />
+
+  <link name="world" />
+  <xacro:ar_robot parent="world">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </xacro:ar_robot>
+
+  <xacro:ar_ros2_control
+    name="$(arg name)"
+    plugin_name="gazebo_ros2_control/GazeboSystem"
+    serial_port="None"
+    calibrate="False"
+  />
+
+  <gazebo reference="world" />
+  <gazebo>
+    <plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control">
+      <parameters>$(arg simulation_controllers)</parameters>
+    </plugin>
+  </gazebo>
+</robot>

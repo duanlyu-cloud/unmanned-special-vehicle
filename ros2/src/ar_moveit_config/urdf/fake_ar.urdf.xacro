@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+  <xacro:include filename="$(find ar_description)/urdf/ar_macro.xacro"/>
+  <xacro:include filename="$(find ar_description)/urdf/ar.ros2_control.xacro"/>
+  
+  <link name="world" />
+  <xacro:ar_robot parent="world">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </xacro:ar_robot>
+
+  <xacro:ar_ros2_control
+    name="ARFakeSystem"
+    plugin_name="mock_components/GenericSystem"
+    serial_port="/dev/ttyACM0"
+    calibrate="False"
+  />
+</robot>

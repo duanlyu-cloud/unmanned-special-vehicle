@@ -16,9 +16,11 @@ void TeensyDriver::init(std::string port, int baudrate, int num_joints) {
   serial_port_.open(port, ec);
 
   if (ec) {
-    RCLCPP_WARN(logger_, "Failed to connect to serial port %s", port.c_str());
+    RCLCPP_WARN(logger_, "Failed to connect to serial port %s: %s", port.c_str(), ec.message().c_str());
+    connected_ = false;
     return;
   } else {
+    connected_ = true;
     serial_port_.set_option(boost::asio::serial_port_base::baud_rate(
         static_cast<uint32_t>(baudrate)));
     serial_port_.set_option(boost::asio::serial_port_base::parity(

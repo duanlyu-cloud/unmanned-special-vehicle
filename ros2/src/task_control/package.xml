@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>task_control</name>
+  <version>0.1.0</version>
+  <description>
+    TaskManager, MaterialManager and MissionScheduler for the AR4 robot task control system.
+  </description>
+  <license>MIT</license>
+
+  <author>Yifei Cheng</author>
+  <maintainer email="ycheng517@gmail.com">Yifei Cheng</maintainer>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>robot_interfaces</depend>
+  <depend>robot_executor</depend>
+  <depend>std_srvs</depend>
+  <depend>yaml-cpp</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

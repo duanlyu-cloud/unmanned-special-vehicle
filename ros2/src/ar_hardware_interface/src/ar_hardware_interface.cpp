@@ -41,6 +41,11 @@ hardware_interface::CallbackReturn ARHardwareInterface::on_activate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
   RCLCPP_INFO(logger_, "Activating hardware interface...");
 
+  if (!driver_.isConnected()) {
+    RCLCPP_ERROR(logger_, "Cannot activate: serial port not connected");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   // calibrate joints if needed
   bool calibrate = info_.hardware_parameters.at("calibrate") == "True";
   if (calibrate) {
@@ -89,6 +94,10 @@ ARHardwareInterface::export_command_interfaces() {
 
 hardware_interface::return_type ARHardwareInterface::read(
     const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/) {
+  if (!driver_.isConnected()) {
+    return hardware_interface::return_type::ERROR;
+  }
+  
   driver_.getJointPositions(actuator_positions_);
   for (size_t i = 0; i < info_.joints.size(); ++i) {
     // apply offsets, convert from deg to rad for moveit
@@ -107,6 +116,10 @@ hardware_interface::return_type ARHardwareInterface::read(
 
 hardware_interface::return_type ARHardwareInterface::write(
     const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/) {
+  if (!driver_.isConnected()) {
+    return hardware_interface::return_type::ERROR;
+  }
+  
   for (size_t i = 0; i < info_.joints.size(); ++i) {
     // convert from rad to deg, apply offsets
     actuator_commands_[i] =

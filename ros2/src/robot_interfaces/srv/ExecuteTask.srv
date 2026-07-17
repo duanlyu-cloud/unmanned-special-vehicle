@@ -1,0 +1,4 @@
+robot_interfaces/Task task
+---
+bool accepted
+string message

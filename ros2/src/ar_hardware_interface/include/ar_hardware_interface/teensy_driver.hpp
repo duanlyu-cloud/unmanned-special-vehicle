@@ -21,11 +21,13 @@ class TeensyDriver {
               std::vector<double>& joint_states);
   void getJointPositions(std::vector<double>& joint_positions);
   void calibrateJoints();
+  bool isConnected() const { return connected_; }
 
   TeensyDriver();
 
  private:
-  bool initialised_;
+  bool initialised_ = false;
+  bool connected_ = false;
   std::string version_;
   boost::asio::io_service io_service_;
   boost::asio::serial_port serial_port_;

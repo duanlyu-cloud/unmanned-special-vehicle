@@ -1,0 +1,123 @@
+# ============================================================================
+# AR4 机械臂姿态配置文件
+# ============================================================================
+# 关节顺序: [joint_1, joint_2, joint_3, joint_4, joint_5, joint_6]
+# 单位: 弧度 (度数 = 弧度 × 180 / π)
+#
+# 关节角度范围:
+#   joint_1: -170° ~ 170°  (-2.967 ~ 2.967 rad)  腰部旋转
+#   joint_2: -42°  ~ 90°   (-0.733 ~ 1.571 rad)   肩部
+#   joint_3: -89°  ~ 52°   (-1.553 ~ 0.908 rad)   肘部
+#   joint_4: -165° ~ 165°  (-2.880 ~ 2.880 rad)   腕部旋转
+#   joint_5: -105° ~ 105°  (-1.833 ~ 1.833 rad)   腕部俯仰
+#   joint_6: -155° ~ 155°  (-2.705 ~ 2.705 rad)   法兰旋转
+#
+# 笛卡尔坐标系:
+#   原点: base_link
+#   末端: link_6 (不是 tool0)
+#   位姿: {x, y, z} 位置 + {qx, qy, qz, qw} 四元数姿态
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 基础位姿
+# ----------------------------------------------------------------------------
+
+# Home 位: 机械臂初始/安全位置 (所有关节归零)
+# 笛卡尔坐标: x=-0.007, y=-0.308, z=0.475
+home_pose:
+  joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# task_point_A: Home → task_pose 的中间关节 waypoint
+# 笛卡尔坐标: x=-0.163, y=0.007, z=0.344
+task_point_A: [1.5679, -0.3961, 0.8943, 0.0, -0.4873, 0.0]
+
+# task_point_B: task_pose → Home 的中间关节 waypoint
+# 笛卡尔坐标: x=-0.492, y=0.006, z=0.450
+task_point_B: [1.5679, 0.6633, -0.8464, 0.0, 0.1939, 0.0]
+
+# task_pose: 任务目标位置
+# 笛卡尔坐标: x=-0.490, y=0.006, z=0.339
+task_pose:
+  joints: [1.5679, 0.6857, -0.3811, 0.0, -0.2938, 0.0]
+
+# task_cartesian_path: 中间点之后的笛卡尔直线路径
+# 说明: 包含起始点和终点，computeCartesianPath 从当前状态开始
+# 正向: A → task_pose (Task 1), 反向: task_pose → A (Task 2)
+#
+# task_cartesian_path_forward: task_point_A → task_pose 的笛卡尔直线
+# task_cartesian_path_reverse: task_pose → task_point_B 的笛卡尔直线
+task_cartesian_path_forward:
+  - {x: -0.163, y: 0.007, z: 0.344, qx: 0.502, qy: 0.503, qz: -0.498, qw: -0.497}
+  - {x: -0.490, y: 0.006, z: 0.339, qx: 0.502, qy: 0.503, qz: -0.498, qw: -0.497}
+
+task_cartesian_path_reverse:
+  - {x: -0.490, y: 0.006, z: 0.339, qx: 0.502, qy: 0.503, qz: -0.498, qw: -0.497}
+  - {x: -0.492, y: 0.006, z: 0.450, qx: 0.502, qy: 0.503, qz: -0.498, qw: -0.497}
+
+# ----------------------------------------------------------------------------
+# 物料配置
+# ----------------------------------------------------------------------------
+# material_id 规则:
+#   奇数 (1,3,5) = 左放 (L), joint_1 = -90°
+#   偶数 (2,4,6) = 右放 (R), joint_1 = +90°
+# 底盘定位:
+#   material_id 1,2 → 定位点1 (左右各一个物料)
+#   material_id 3,4 → 定位点2 (左右各一个物料)
+#   material_id 5,6 → 定位点3 (左右各一个物料)
+#
+# 执行流程 (task_type=1 放任务):
+#   任务区: Home → task_point_A → (笛卡尔) → task_pose → (笛卡尔) → task_point_B → Home
+#   物料区: Home → na → (笛卡尔) → material_pose → (笛卡尔) → nc → Home
+#
+# 执行流程 (task_type=2 取任务, 镜像):
+#   物料区: Home → nc → (笛卡尔) → material_pose → (笛卡尔) → na → Home
+#   任务区: Home → task_point_B → (笛卡尔) → task_pose → (笛卡尔) → task_point_A → Home
+#
+# 字段说明:
+#   name:            物料名称 (显示用)
+#   material_pose:   物料点目标关节角度 (笛卡尔直线到达)
+#   forward_points:  正向中间关节 waypoint 列表 (从远到近: na, nb, ...)
+#                    放任务: Home → forward_points → material_pose
+#                    取任务: material_pose → forward_points → Home
+#   return_point:    返回中间关节 waypoint (nc)
+#                    放任务: material_pose → return_point → Home
+#                    取任务: Home → return_point → material_pose
+#   material_cartesian_path_forward: na → material_pose 的笛卡尔直线
+#   material_cartesian_path_reverse: material_pose → nc 的笛卡尔直线
+#   说明: 包含起始点和终点，正向/反向镜像时自动反转
+
+materials:
+  material1:
+    name: "Material L1"
+    material_pose: [-1.5680, 0.7474, -0.3559, 0.0, -0.3913, 0.0]
+    forward_points:
+      - [-1.5679, 0.7376, -1.1023, 0.0, 0.3646, 0.0]   # na/l1
+    return_point: [-1.5680, -0.0598, 0.8998, 0.0, -0.8401, 0.0]  # nc/l2
+    material_cartesian_path_forward:
+      - {x: 0.498, y: -0.008, z: 0.308, qx: -0.499, qy: 0.501, qz: -0.501, qw: 0.499}
+    material_cartesian_path_reverse:
+      - {x: 0.215, y: -0.008, z: 0.308, qx: 0.499, qy: -0.501, qz: 0.501, qw: -0.499}
+
+  material2:
+    name: "Material R1"
+    material_pose: [1.5679, 0.7434, -0.3551, 0.0, -0.3885, 0.0]
+    forward_points:
+      - [1.5679, 0.7334, -1.0938, 0.0, 0.3606, 0.0]
+    return_point: [1.5679, -0.0603, 0.8910, 0.0, -0.8306, 0.0]
+    material_cartesian_path_forward:
+      - {x: -0.497, y: 0.006, z: 0.310, qx: -0.499, qy: -0.501, qz: 0.501, qw: 0.499}
+    material_cartesian_path_reverse:
+      - {x: -0.217, y: 0.006, z: 0.310, qx: 0.499, qy: 0.501, qz: -0.501, qw: -0.499}
+
+# ----------------------------------------------------------------------------
+# 调试提示
+# ----------------------------------------------------------------------------
+# 测量笛卡尔坐标:
+#   ros2 run tf2_ros tf2_echo base_link link_6
+#
+# 测试任务:
+#   ros2 service call /execute_task robot_interfaces/srv/ExecuteTask \
+#     "{task: {task_type: 1, material_id: 1, task_id: 'test'}}"
+#
+# 重置状态 (Error → Idle):
+#   ros2 service call /reset_state std_srvs/srv/Trigger

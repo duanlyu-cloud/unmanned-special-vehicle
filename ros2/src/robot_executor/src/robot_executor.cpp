@@ -127,9 +127,6 @@ bool RobotExecutor::moveCartesianPath(
           RCLCPP_WARN(node_->get_logger(),
                       "Using stale joint state for Cartesian path");
         }
-        move_group_->setStartStateToCurrentState();
-
-        moveit_msgs::msg::RobotTrajectory trajectory;
 
         RCLCPP_INFO(node_->get_logger(),
                     "Computing Cartesian path with %zu waypoints", waypoints.size());
@@ -140,16 +137,36 @@ bool RobotExecutor::moveCartesianPath(
                       waypoints[i].position.z);
         }
 
-        double fraction = move_group_->computeCartesianPath(
-            waypoints, 0.02, 0.0, trajectory);
+        moveit_msgs::msg::RobotTrajectory trajectory;
+        double fraction = 0.0;
+        const int max_retries = 3;
 
-        RCLCPP_INFO(node_->get_logger(),
-                    "Cartesian path: %.1f%% complete", fraction * 100.0);
+        for (int attempt = 0; attempt < max_retries; ++attempt) {
+          move_group_->setStartStateToCurrentState();
+          trajectory = moveit_msgs::msg::RobotTrajectory();
+          fraction = move_group_->computeCartesianPath(
+              waypoints, 0.02, 0.0, trajectory);
+
+          RCLCPP_INFO(node_->get_logger(),
+                      "Cartesian path: %.1f%% complete (attempt %d/%d)",
+                      fraction * 100.0, attempt + 1, max_retries);
+
+          if (fraction >= 0.90) {
+            break;
+          }
+
+          if (attempt < max_retries - 1) {
+            RCLCPP_WARN(node_->get_logger(),
+                        "Cartesian path too incomplete (%.1f%%), retrying...",
+                        fraction * 100.0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          }
+        }
 
         if (fraction < 0.90) {
           RCLCPP_ERROR(node_->get_logger(),
-                       "Cartesian path too incomplete (%.1f%%), aborting",
-                       fraction * 100.0);
+                       "Cartesian path failed after %d attempts (%.1f%%)",
+                       max_retries, fraction * 100.0);
           return false;
         }
 

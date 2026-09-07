@@ -12,6 +12,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Task.msg"
   "msg/TaskResult.msg"
   "srv/ExecuteTask.srv"
+  "srv/ChassisMove.srv"
   DEPENDENCIES
 )
 

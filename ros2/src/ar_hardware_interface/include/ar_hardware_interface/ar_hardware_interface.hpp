@@ -4,7 +4,6 @@
 #include <chrono>
 #include <hardware_interface/system_interface.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <thread>
 
 #include "ar_hardware_interface/teensy_driver.hpp"
 

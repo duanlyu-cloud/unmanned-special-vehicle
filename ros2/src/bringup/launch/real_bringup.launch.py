@@ -2,14 +2,17 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
-from launch.substitutions import Command, FindExecutable, PathJoinSubstitution
+from launch.substitutions import Command, FindExecutable, PathJoinSubstitution, LaunchConfiguration
 
 
 def generate_launch_description():
+    calibrate = LaunchConfiguration("calibrate")
+    serial_port = LaunchConfiguration("serial_port")
+
     # robot_state_publisher (URDF)
     robot_description_content = Command(
         [
@@ -20,7 +23,10 @@ def generate_launch_description():
             ),
             " ",
             "name:=ar",
-            " serial_port:=/dev/ttyUSB0",
+            " serial_port:=",
+            serial_port,
+            " calibrate:=",
+            calibrate,
         ]
     )
     robot_description = {"robot_description": robot_description_content}
@@ -100,6 +106,17 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "calibrate",
+            default_value="True",
+            description="Calibrate the robot on startup",
+            choices=["True", "False"],
+        ),
+        DeclareLaunchArgument(
+            "serial_port",
+            default_value="/dev/ttyACM0",
+            description="Serial port for Teensy 4.1",
+        ),
         robot_state_publisher_node,
         controller_manager_node,
         joint_state_broadcaster_spawner,

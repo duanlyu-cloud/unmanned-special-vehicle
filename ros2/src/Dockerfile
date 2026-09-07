@@ -1,4 +1,4 @@
-FROM ros:iron
+FROM ros:humble
 
 # nvidia-container-runtime
 ENV NVIDIA_VISIBLE_DEVICES \

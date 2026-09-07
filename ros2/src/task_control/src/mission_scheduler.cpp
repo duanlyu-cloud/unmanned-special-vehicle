@@ -21,7 +21,9 @@ MissionScheduler::MissionScheduler(
     : node_(node), executor_(executor), material_manager_(material_manager) {
   result_pub_ =
       node_->create_publisher<robot_interfaces::msg::TaskResult>("/task_result",
-                                                                  10);
+                                                                   10);
+  chassis_client_ =
+      node_->create_client<robot_interfaces::srv::ChassisMove>("/chassis/move_to");
 }
 
 void MissionScheduler::executeTask(uint8_t task_type, uint8_t material_id,
@@ -64,7 +66,7 @@ void MissionScheduler::executeTask(uint8_t task_type, uint8_t material_id,
 
   for (size_t i = 0; i < steps.size(); ++i) {
     const auto &step = steps[i];
-    const char* action_names[] = {"Home", "MoveTo", "MovePath", "MoveCartesian"};
+    const char* action_names[] = {"Home", "MoveTo", "MovePath", "MoveCartesian", "ChassisMove"};
     RCLCPP_INFO(node_->get_logger(), "Step %zu/%zu: %s", i + 1, steps.size(),
                 action_names[static_cast<int>(step.action)]);
 
@@ -108,15 +110,23 @@ void MissionScheduler::publishResult(const std::string &task_id,
 
 // ============================================================================
 // Task 1: 放任务 (取任务点物料 → 放回物料点)
-// 流程: 任务点部分 → 物料点部分
+// 流程: 底盘移到任务点 → 任务点部分 → 底盘移到物料点 → 物料点部分
+// 初始位置: 物料点
 // ============================================================================
 std::vector<Step>
 MissionScheduler::buildTask1Steps(const Material &material) {
   std::vector<Step> steps;
 
+  // Chassis: move from material_station to task_station
+  steps.push_back({ActionType::ChassisMove, {}, {}, {}, "task_station"});
+
   // 任务点部分: Home → A → task_pose → B → Home
   auto task_steps = buildTaskPointForwardSteps();
   steps.insert(steps.end(), task_steps.begin(), task_steps.end());
+
+  // Chassis: move from task_station to material_station
+  std::string station_id = "material_" + std::to_string(material.id);
+  steps.push_back({ActionType::ChassisMove, {}, {}, {}, station_id});
 
   // 物料点部分: Home → na → nb → ... → material_pose → nc → Home
   auto material_steps = buildMaterialForwardSteps(material);
@@ -127,7 +137,8 @@ MissionScheduler::buildTask1Steps(const Material &material) {
 
 // ============================================================================
 // Task 2: 取任务 (取物料点物料 → 放到任务点)
-// 流程: 物料点部分 → 任务点部分
+// 流程: 物料点部分 → 底盘移到任务点 → 任务点部分 → 底盘移回物料点
+// 初始位置: 物料点
 // ============================================================================
 std::vector<Step>
 MissionScheduler::buildTask2Steps(const Material &material) {
@@ -137,9 +148,16 @@ MissionScheduler::buildTask2Steps(const Material &material) {
   auto material_steps = buildMaterialReturnSteps(material);
   steps.insert(steps.end(), material_steps.begin(), material_steps.end());
 
+  // Chassis: move from material to task_station
+  steps.push_back({ActionType::ChassisMove, {}, {}, {}, "task_station"});
+
   // 任务点部分: Home → B → task_pose → A → Home
   auto task_steps = buildTaskPointReturnSteps();
   steps.insert(steps.end(), task_steps.begin(), task_steps.end());
+
+  // Chassis: move back to material_station
+  std::string station_id = "material_" + std::to_string(material.id);
+  steps.push_back({ActionType::ChassisMove, {}, {}, {}, station_id});
 
   return steps;
 }
@@ -339,8 +357,46 @@ bool MissionScheduler::executeStep(const Step &step) {
     return executor_->moveJointPath(step.waypoints);
   case ActionType::MoveCartesian:
     return executor_->moveCartesianPath(step.cartesian_waypoints);
+  case ActionType::ChassisMove:
+    return moveChassis(step.chassis_station);
   }
   return false;
+}
+
+bool MissionScheduler::moveChassis(const std::string &station_id) {
+  if (!chassis_client_->wait_for_service(std::chrono::seconds(2))) {
+    RCLCPP_ERROR(node_->get_logger(), "Chassis service /chassis/move_to not available");
+    return false;
+  }
+
+  auto request = std::make_shared<robot_interfaces::srv::ChassisMove::Request>();
+  request->station_id = station_id;
+
+  RCLCPP_INFO(node_->get_logger(), "ChassisMove: moving to %s", station_id.c_str());
+
+  auto future = chassis_client_->async_send_request(request);
+
+  // Spin in a separate single-threaded executor to avoid conflict with node's executor
+  auto executor = rclcpp::executors::SingleThreadedExecutor();
+  executor.add_node(node_->get_node_base_interface());
+  auto ret = executor.spin_until_future_complete(future, std::chrono::seconds(60));
+  executor.remove_node(node_->get_node_base_interface());
+
+  if (ret != rclcpp::FutureReturnCode::SUCCESS) {
+    RCLCPP_ERROR(node_->get_logger(), "ChassisMove: service call failed (timeout)");
+    return false;
+  }
+
+  auto response = future.get();
+  if (response->success) {
+    RCLCPP_INFO(node_->get_logger(), "ChassisMove: reached %s at %.2f mm",
+                station_id.c_str(), response->actual_position);
+    return true;
+  } else {
+    RCLCPP_ERROR(node_->get_logger(), "ChassisMove failed: [%d] %s",
+                 response->error_code, response->message.c_str());
+    return false;
+  }
 }
 
 } // namespace task_control

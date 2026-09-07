@@ -25,9 +25,16 @@ joint_trajectory_controller:
     constraints:
       stopped_velocity_tolerance: 0.02
       goal_time: 0.0
-      joint_1: { trajectory: 0.2, goal: 0.02 }
-      joint_2: { trajectory: 0.2, goal: 0.02 }
-      joint_3: { trajectory: 0.2, goal: 0.02 }
-      joint_4: { trajectory: 0.2, goal: 0.02 }
-      joint_5: { trajectory: 0.2, goal: 0.02 }
-      joint_6: { trajectory: 0.2, goal: 0.02 }
+      joint_1: { trajectory: 0.5, goal: 0.1 }
+      joint_2: { trajectory: 1.5, goal: 0.3 }
+      joint_3: { trajectory: 0.5, goal: 0.1 }
+      joint_4: { trajectory: 0.5, goal: 0.1 }
+      joint_5: { trajectory: 0.5, goal: 0.1 }
+      joint_6: { trajectory: 0.5, goal: 0.1 }
+    state_tolerances:
+      joint_1: { position: 0.5 }
+      joint_2: { position: 0.5 }
+      joint_3: { position: 0.5 }
+      joint_4: { position: 0.5 }
+      joint_5: { position: 0.5 }
+      joint_6: { position: 0.5 }

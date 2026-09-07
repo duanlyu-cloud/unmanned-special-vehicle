@@ -8,17 +8,19 @@
 #include <geometry_msgs/msg/pose.hpp>
 #include "robot_executor/robot_executor.hpp"
 #include "robot_interfaces/msg/task_result.hpp"
+#include "robot_interfaces/srv/chassis_move.hpp"
 #include "task_control/material_manager.hpp"
 
 namespace task_control {
 
-enum class ActionType { Home, MoveTo, MovePath, MoveCartesian };
+enum class ActionType { Home, MoveTo, MovePath, MoveCartesian, ChassisMove };
 
 struct Step {
   ActionType action;
   std::vector<double> target;
   std::vector<std::vector<double>> waypoints;
   std::vector<geometry_msgs::msg::Pose> cartesian_waypoints;
+  std::string chassis_station;  // Target station for ChassisMove
 };
 
 enum class SchedulerState { Idle, Running, Finished, Error };
@@ -59,6 +61,9 @@ private:
   const MaterialManager &material_manager_;
 
   rclcpp::Publisher<robot_interfaces::msg::TaskResult>::SharedPtr result_pub_;
+  rclcpp::Client<robot_interfaces::srv::ChassisMove>::SharedPtr chassis_client_;
+
+  bool moveChassis(const std::string &station_id);
 
   SchedulerState state_{SchedulerState::Idle};
   std::string last_result_;

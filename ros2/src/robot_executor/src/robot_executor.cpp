@@ -1,5 +1,6 @@
 #include "robot_executor/robot_executor.hpp"
 
+#include <fstream>
 #include <future>
 
 namespace robot_executor {
@@ -14,11 +15,9 @@ bool RobotExecutor::init() {
   move_group_->setPlanningTime(5.0);
   move_group_->setNumPlanningAttempts(3);
 
-  rclcpp::QoS qos(rclcpp::KeepLast(10));
-  qos.transient_local();
-  qos.reliable();
+  // Use SensorDataQoS (keep last, volatile, reliable) to match joint_state_broadcaster
   joint_state_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
-      "/joint_states", qos,
+      "/joint_states", rclcpp::SensorDataQoS(),
       std::bind(&RobotExecutor::jointStateCallback, this,
                 std::placeholders::_1));
 
@@ -73,7 +72,8 @@ std::vector<double> RobotExecutor::getCurrentJointValues() {
 }
 
 bool RobotExecutor::moveHome() {
-  return executeWithTimeout(
+  enableClosedLoop();
+  bool result = executeWithTimeout(
       [this]() {
         move_group_->setNamedTarget("home");
         move_group_->setMaxVelocityScalingFactor(0.5);
@@ -82,6 +82,8 @@ bool RobotExecutor::moveHome() {
         return (result == moveit::core::MoveItErrorCode::SUCCESS);
       },
       "moveHome");
+  disableClosedLoop();
+  return result;
 }
 
 bool RobotExecutor::moveJoint(const std::vector<double> &joints) {
@@ -89,7 +91,8 @@ bool RobotExecutor::moveJoint(const std::vector<double> &joints) {
     RCLCPP_ERROR(node_->get_logger(), "moveJoint: empty joint vector");
     return false;
   }
-  return executeWithTimeout(
+  enableClosedLoop();
+  bool result = executeWithTimeout(
       [this, joints]() {
         move_group_->setJointValueTarget(joints);
         move_group_->setMaxVelocityScalingFactor(0.5);
@@ -98,6 +101,8 @@ bool RobotExecutor::moveJoint(const std::vector<double> &joints) {
         return (result == moveit::core::MoveItErrorCode::SUCCESS);
       },
       "moveJoint");
+  disableClosedLoop();
+  return result;
 }
 
 bool RobotExecutor::moveJointPath(
@@ -116,12 +121,13 @@ bool RobotExecutor::moveJointPath(
 
 bool RobotExecutor::moveCartesianPath(
     const std::vector<geometry_msgs::msg::Pose> &waypoints) {
-  return executeWithTimeout(
+  enableClosedLoop();
+  bool result = executeWithTimeout(
       [this, waypoints]() {
         move_group_->setEndEffectorLink("link_6");
         move_group_->setPoseReferenceFrame("base_link");
-        move_group_->setMaxVelocityScalingFactor(0.5);
-        move_group_->setMaxAccelerationScalingFactor(0.5);
+        move_group_->setMaxVelocityScalingFactor(0.15);
+        move_group_->setMaxAccelerationScalingFactor(0.15);
 
         if (!waitForFreshJointState(std::chrono::milliseconds(500))) {
           RCLCPP_WARN(node_->get_logger(),
@@ -145,7 +151,7 @@ bool RobotExecutor::moveCartesianPath(
           move_group_->setStartStateToCurrentState();
           trajectory = moveit_msgs::msg::RobotTrajectory();
           fraction = move_group_->computeCartesianPath(
-              waypoints, 0.02, 0.0, trajectory);
+              waypoints, 0.03, 0.0, trajectory);
 
           RCLCPP_INFO(node_->get_logger(),
                       "Cartesian path: %.1f%% complete (attempt %d/%d)",
@@ -174,6 +180,8 @@ bool RobotExecutor::moveCartesianPath(
                 moveit::core::MoveItErrorCode::SUCCESS);
       },
       "moveCartesianPath");
+  disableClosedLoop();
+  return result;
 }
 
 bool RobotExecutor::movePose(const geometry_msgs::msg::Pose &pose) {
@@ -195,6 +203,16 @@ bool RobotExecutor::movePose(const geometry_msgs::msg::Pose &pose) {
 void RobotExecutor::stop() {
   move_group_->stop();
   RCLCPP_WARN(node_->get_logger(), "RobotExecutor: motion stopped");
+}
+
+void RobotExecutor::enableClosedLoop() {
+  std::ofstream flag("/tmp/closed_loop_flag", std::ios::trunc);
+  flag << '1';
+}
+
+void RobotExecutor::disableClosedLoop() {
+  std::ofstream flag("/tmp/closed_loop_flag", std::ios::trunc);
+  flag << '0';
 }
 
 bool RobotExecutor::isMoving() const { return moving_; }

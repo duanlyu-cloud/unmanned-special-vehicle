@@ -1,0 +1,9 @@
+# ChassisMove.srv
+# Move the chassis to a named station position.
+# Station positions are defined in waypoints.yaml.
+string  station_id       # Name of target station (task_station / material_station / ...)
+---
+bool    success           # Whether the move completed successfully
+float64 actual_position   # Actual reached position in mm
+int32   error_code        # 0=OK, 1=timeout, 2=alarm, 3=modbus_error
+string  message           # Human-readable status

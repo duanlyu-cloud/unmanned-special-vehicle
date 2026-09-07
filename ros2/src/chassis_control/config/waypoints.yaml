@@ -1,0 +1,36 @@
+# Chassis waypoints - linear rail station positions (mm)
+# Origin (0mm) = rear end of rail, positive = forward
+#
+# Extensibility: add more entries to material_stations for additional pick points.
+
+waypoints:
+  task_station:
+    position: 990.0     # Task area (re-measured 2026-08-05)
+    speed: 200
+    desc: "任务区工作站"
+
+  # Material stations array — index+1 = material_id
+  # material_id=1 → material_stations[0]
+  material_stations:
+    - position: 10.0      # Material station 1 (10mm from origin)
+      speed: 200
+      desc: "物料区站点1"
+    # - position: 75.0    # Material station 2 (add when needed)
+    #   speed: 300
+    #   desc: "物料区站点2"
+
+limits:
+  min_position: 0.0
+  max_position: 1010.0
+
+motion:
+  default_speed: 200
+  max_speed: 800
+  position_tolerance: 2.0
+  max_retries: 2
+  move_timeout_factor: 2.0
+
+driver:
+  port: "/dev/ttyUSB1"
+  slave_addr: 1
+  baudrate: 9600

@@ -1,6 +1,9 @@
 #include "ar_hardware_interface/teensy_driver.hpp"
 
+#include <cerrno>
 #include <chrono>
+#include <cstring>
+#include <sys/select.h>
 #include <thread>
 
 #define FW_VERSION "0.0.1"
@@ -10,6 +13,11 @@ namespace ar_hardware_interface {
 void TeensyDriver::init(std::string port, int baudrate, int num_joints) {
   // @TODO read version from config
   version_ = FW_VERSION;
+
+  // initialise joint and encoder calibration (before exchange to avoid segfault)
+  num_joints_ = num_joints;
+  joint_positions_deg_.resize(num_joints_);
+  enc_calibrations_.resize(num_joints_);
 
   // establish connection with teensy board
   boost::system::error_code ec;
@@ -29,6 +37,13 @@ void TeensyDriver::init(std::string port, int baudrate, int num_joints) {
                 port.c_str());
   }
 
+  // flush stale serial data from previous session
+  try {
+    serial_port_.cancel();
+  } catch (...) {}
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  drainBuffer();
+
   initialised_ = false;
   std::string msg = "STA" + version_ + "\n";
 
@@ -40,11 +55,6 @@ void TeensyDriver::init(std::string port, int baudrate, int num_joints) {
   }
   RCLCPP_INFO(logger_, "Successfully initialised driver on port %s",
               port.c_str());
-
-  // initialise joint and encoder calibration
-  num_joints_ = num_joints;
-  joint_positions_deg_.resize(num_joints_);
-  enc_calibrations_.resize(num_joints_);
 }
 
 TeensyDriver::TeensyDriver() : serial_port_(io_service_) {}
@@ -80,8 +90,49 @@ void TeensyDriver::update(std::vector<double>& pos_commands,
 }
 
 void TeensyDriver::calibrateJoints() {
-  std::string outMsg = "JC\n";
-  sendCommand(outMsg);
+  // 串行校准：先校准关节 1-3 (A,B,C)，完成后回到 REST，再校准关节 4-6 (D,E,F)
+  // 避免所有关节并行运动导致的中间姿态损坏末端结构
+  RCLCPP_INFO(logger_, "Calibrating joints 1-3 (A,B,C)...");
+  std::string outMsg1 = "JC1\n";
+  exchangeWithTimeout(outMsg1, CALIBRATION_TIMEOUT_MS);
+
+  RCLCPP_INFO(logger_, "Calibrating joints 4-6 (D,E,F)...");
+  std::string outMsg2 = "JC2\n";
+  exchangeWithTimeout(outMsg2, CALIBRATION_TIMEOUT_MS);
+}
+
+void TeensyDriver::toggleClosedLoop() {
+  if (!connected_) return;
+  std::lock_guard<std::mutex> lock(serial_mutex_);
+  std::string outMsg = "CL\n";
+  std::string err;
+
+  if (!transmit(outMsg, err)) {
+    RCLCPP_ERROR(logger_, "toggleClosedLoop: transmit error: %s", err.c_str());
+    return;
+  }
+
+  std::string inMsg;
+  if (!receive(inMsg, DEFAULT_RECEIVE_TIMEOUT_MS)) {
+    RCLCPP_ERROR(logger_, "toggleClosedLoop: receive timeout");
+    return;
+  }
+
+  if (inMsg == "CLA1") {
+    closed_loop_enabled_ = true;
+    RCLCPP_INFO(logger_, "Closed-loop ENABLED (encoder feedback active)");
+  } else if (inMsg == "CLA0") {
+    closed_loop_enabled_ = false;
+    RCLCPP_INFO(logger_, "Closed-loop DISABLED (open-loop stepper only)");
+  } else {
+    RCLCPP_WARN(logger_, "toggleClosedLoop: unexpected response '%s'",
+                inMsg.c_str());
+  }
+}
+
+void TeensyDriver::setClosedLoopDesired(bool enable) {
+  if (!connected_ || enable == closed_loop_enabled_) return;
+  toggleClosedLoop();
 }
 
 void TeensyDriver::getJointPositions(std::vector<double>& joint_positions) {
@@ -96,35 +147,66 @@ void TeensyDriver::sendCommand(std::string outMsg) { exchange(outMsg); }
 
 // Send msg to board and collect data
 void TeensyDriver::exchange(std::string outMsg) {
+  exchangeWithTimeout(outMsg, DEFAULT_RECEIVE_TIMEOUT_MS);
+}
+
+// Send msg to board and collect data with configurable receive timeout
+void TeensyDriver::exchangeWithTimeout(std::string outMsg,
+                                       int receive_timeout_ms) {
+  std::lock_guard<std::mutex> lock(serial_mutex_);
+
+  // Guard: do not attempt communication on a disconnected port
+  if (!connected_) {
+    RCLCPP_WARN_THROTTLE(logger_, clock_, 5000,
+                         "exchangeWithTimeout: serial port disconnected, "
+                         "skipping TX/RX");
+    return;
+  }
+
   std::string inMsg;
   std::string errTransmit = "";
 
   if (!transmit(outMsg, errTransmit)) {
     RCLCPP_ERROR(logger_, "Error in transmit: %s", errTransmit.c_str());
+    return;
   }
 
   bool done = false;
+  auto deadline = std::chrono::steady_clock::now() +
+                  std::chrono::milliseconds(receive_timeout_ms);
+
   while (!done) {
-    receive(inMsg);
+    auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      RCLCPP_ERROR(logger_,
+                   "exchangeWithTimeout: total timeout after %d ms",
+                   receive_timeout_ms);
+      return;
+    }
+    int remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           deadline - now)
+                           .count();
+
+    if (!receive(inMsg, remaining_ms)) {
+      RCLCPP_ERROR(logger_, "exchangeWithTimeout: receive timed out");
+      return;
+    }
+
     // parse msg
     std::string header = inMsg.substr(0, 2);
     if (header == "ST") {
-      // init acknowledgement
       checkInit(inMsg);
       done = true;
     } else if (header == "JC") {
-      // encoder calibration values
       updateEncoderCalibrations(inMsg);
       done = true;
     } else if (header == "JP") {
-      // encoder steps
       updateJointPositions(inMsg);
       done = true;
     } else if (header == "DB") {
     } else {
-      // unknown header
-      RCLCPP_WARN(logger_, "Unknown header %s", header.c_str());
-      done = true;
+      RCLCPP_WARN(logger_, "Unknown header '%s', continuing to wait",
+                  header.c_str());
     }
   }
 }
@@ -139,16 +221,69 @@ bool TeensyDriver::transmit(std::string msg, std::string& err) {
     return true;
   } else {
     err = "Error in transmit";
+    // Terminal errors: device disconnected — mark as disconnected to stop
+    // further attempts and prevent error spam at 100Hz read() cycle
+    if (ec == boost::asio::error::eof ||
+        ec == boost::asio::error::bad_descriptor) {
+      RCLCPP_ERROR(logger_, "transmit: serial port lost (EOF/bad fd), "
+                   "marking disconnected");
+      connected_ = false;
+    }
     return false;
   }
 }
 
-void TeensyDriver::receive(std::string& inMsg) {
+bool TeensyDriver::receive(std::string& inMsg, int timeout_ms) {
   char c;
   std::string msg = "";
   bool eol = false;
+
+  auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
   while (!eol) {
-    boost::asio::read(serial_port_, boost::asio::buffer(&c, 1));
+    auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      return false;
+    }
+    auto remaining_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        deadline - now);
+
+    boost::asio::serial_port::native_handle_type native_fd =
+        serial_port_.native_handle();
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(native_fd, &read_fds);
+
+    struct timeval tv;
+    tv.tv_sec = remaining_us.count() / 1000000;
+    tv.tv_usec = remaining_us.count() % 1000000;
+
+    int ret =
+        select(static_cast<int>(native_fd) + 1, &read_fds, nullptr, nullptr,
+               &tv);
+    if (ret < 0) {
+      RCLCPP_ERROR(logger_, "receive: select() error: %s", std::strerror(errno));
+      return false;
+    }
+    if (ret == 0) {
+      return false;
+    }
+
+    boost::system::error_code ec;
+    boost::asio::read(serial_port_, boost::asio::buffer(&c, 1), ec);
+    if (ec) {
+      RCLCPP_ERROR(logger_, "receive: read error: %s", ec.message().c_str());
+      // Terminal errors: device disconnected — mark as disconnected
+      if (ec == boost::asio::error::eof ||
+          ec == boost::asio::error::bad_descriptor) {
+        RCLCPP_ERROR(logger_, "receive: serial port lost (EOF/bad fd), "
+                     "marking disconnected");
+        connected_ = false;
+      }
+      return false;
+    }
+
     switch (c) {
       case '\r':
         break;
@@ -160,6 +295,39 @@ void TeensyDriver::receive(std::string& inMsg) {
     }
   }
   inMsg = msg;
+  return true;
+}
+
+void TeensyDriver::drainBuffer() {
+  boost::system::error_code ec;
+  char dummy;
+  int drained = 0;
+  auto deadline = std::chrono::steady_clock::now() +
+                  std::chrono::milliseconds(200);
+
+  while (true) {
+    auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) break;
+
+    boost::asio::serial_port::native_handle_type native_fd =
+        serial_port_.native_handle();
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(native_fd, &read_fds);
+
+    struct timeval tv = {0, 10000};
+    int ret =
+        select(static_cast<int>(native_fd) + 1, &read_fds, nullptr, nullptr,
+               &tv);
+    if (ret <= 0) break;
+
+    size_t n = serial_port_.read_some(boost::asio::buffer(&dummy, 1), ec);
+    if (ec || n == 0) break;
+    drained++;
+  }
+  if (drained > 0) {
+    RCLCPP_INFO(logger_, "drainBuffer: flushed %d stale bytes", drained);
+  }
 }
 
 void TeensyDriver::checkInit(std::string msg) {

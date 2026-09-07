@@ -30,7 +30,27 @@ bool TaskManager::init(const std::string &yaml_path) {
                 std::placeholders::_2));
 
   RCLCPP_INFO(node_->get_logger(), "TaskManager initialized, services ready");
+
+  using namespace std::chrono_literals;
+  using namespace std::chrono_literals;
+  home_timer_ = node_->create_wall_timer(5s, [this]() {
+    home_timer_->cancel();
+    RCLCPP_INFO(node_->get_logger(), "Moving to home position...");
+    if (executor_->moveHome()) {
+      RCLCPP_INFO(node_->get_logger(), "Home position reached");
+    } else {
+      RCLCPP_WARN(node_->get_logger(), "Home move failed, arm may already be at home");
+    }
+  });
+
   return true;
+}
+
+bool TaskManager::moveHome() {
+  if (!executor_) {
+    return false;
+  }
+  return executor_->moveHome();
 }
 
 void TaskManager::handleExecuteTask(

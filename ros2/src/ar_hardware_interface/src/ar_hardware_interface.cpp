@@ -1,4 +1,5 @@
 #include <ar_hardware_interface/ar_hardware_interface.hpp>
+#include <fstream>
 #include <sstream>
 
 namespace ar_hardware_interface {
@@ -34,7 +35,12 @@ void ARHardwareInterface::init_variables() {
   joint_position_commands_.resize(num_joints);
   joint_velocity_commands_.resize(num_joints);
   joint_effort_commands_.resize(num_joints);
-  joint_offsets_ = {170.0, -42.0, -89.0, -165.0, -105.0, -155.0};
+  // joint_offsets_ 将固件读取的角度映射到 MoveIt 坐标 (read: pos + offset, write: cmd - offset)
+  // joint_1: offset 从 170.0 调为 160.0 以修正 home 偏左 (2026-07-28)
+  //   调优规则: 校准后检查 /joint_states joint_1
+  //     → 若 arm 仍偏左: 减小此值 (如 155.0, 150.0)
+  //     → 若 arm 偏右:    增大此值 (如 165.0, 170.0)
+  joint_offsets_ = {160.0, -36.0, -89.0, -165.0, -106.8, -155.0};
 }
 
 hardware_interface::CallbackReturn ARHardwareInterface::on_activate(
@@ -46,12 +52,12 @@ hardware_interface::CallbackReturn ARHardwareInterface::on_activate(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  // calibrate joints if needed
+  // calibrate joints synchronously (blocks until complete)
   bool calibrate = info_.hardware_parameters.at("calibrate") == "True";
   if (calibrate) {
-    // run calibration
-    RCLCPP_INFO(logger_, "Running joint calibration...");
+    RCLCPP_INFO(logger_, "Starting joint calibration...");
     driver_.calibrateJoints();
+    RCLCPP_INFO(logger_, "Joint calibration completed.");
   }
 
   // init position commands at current positions
@@ -97,7 +103,24 @@ hardware_interface::return_type ARHardwareInterface::read(
   if (!driver_.isConnected()) {
     return hardware_interface::return_type::ERROR;
   }
-  
+
+  // Check closed-loop toggle flag from task_manager (file-based IPC, throttled to 1Hz)
+  {
+    static auto last_check = clock_.now();
+    if ((clock_.now() - last_check).seconds() > 1.0) {
+      last_check = clock_.now();
+      std::ifstream flag_file("/tmp/closed_loop_flag");
+      if (flag_file.is_open()) {
+        char c;
+        flag_file >> c;
+        bool desired = (c == '1');
+        if (desired != driver_.isClosedLoopEnabled()) {
+          driver_.setClosedLoopDesired(desired);
+        }
+      }
+    }
+  }
+
   driver_.getJointPositions(actuator_positions_);
   for (size_t i = 0; i < info_.joints.size(); ++i) {
     // apply offsets, convert from deg to rad for moveit
@@ -110,7 +133,7 @@ hardware_interface::return_type ARHardwareInterface::read(
                      << radToDeg(joint_positions_[i]);
     logInfo += info_.joints[i].name + ": " + jointPositionStm.str() + " | ";
   }
-  RCLCPP_INFO_THROTTLE(logger_, clock_, 500, logInfo.c_str());
+  RCLCPP_DEBUG_THROTTLE(logger_, clock_, 500, logInfo.c_str());
   return hardware_interface::return_type::OK;
 }
 
@@ -119,7 +142,7 @@ hardware_interface::return_type ARHardwareInterface::write(
   if (!driver_.isConnected()) {
     return hardware_interface::return_type::ERROR;
   }
-  
+
   for (size_t i = 0; i < info_.joints.size(); ++i) {
     // convert from rad to deg, apply offsets
     actuator_commands_[i] =
@@ -132,7 +155,7 @@ hardware_interface::return_type ARHardwareInterface::write(
                      << radToDeg(joint_position_commands_[i]);
     logInfo += info_.joints[i].name + ": " + jointPositionStm.str() + " | ";
   }
-  RCLCPP_INFO_THROTTLE(logger_, clock_, 500, logInfo.c_str());
+  RCLCPP_DEBUG_THROTTLE(logger_, clock_, 500, logInfo.c_str());
   driver_.update(actuator_commands_, actuator_positions_);
   return hardware_interface::return_type::OK;
 }

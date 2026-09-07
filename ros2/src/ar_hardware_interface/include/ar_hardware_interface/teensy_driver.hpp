@@ -2,6 +2,8 @@
 #define TEENSY_DRIVER_H
 
 #include <boost/asio.hpp>
+#include <chrono>
+#include <mutex>
 #include <rclcpp/rclcpp.hpp>
 #include <string>
 #include <unordered_map>
@@ -14,6 +16,11 @@ namespace ar_hardware_interface {
 
 class TeensyDriver {
  public:
+  /// Default receive timeout for normal serial exchanges (milliseconds)
+  static constexpr int DEFAULT_RECEIVE_TIMEOUT_MS = 5000;
+  /// Receive timeout during calibration (milliseconds, 10 minutes)
+  static constexpr int CALIBRATION_TIMEOUT_MS = 600000;
+
   void init(std::string port, int baudrate, int num_joints);
   void setStepperSpeed(std::vector<double>& max_speed,
                        std::vector<double>& max_accel);
@@ -21,6 +28,9 @@ class TeensyDriver {
               std::vector<double>& joint_states);
   void getJointPositions(std::vector<double>& joint_positions);
   void calibrateJoints();
+  void toggleClosedLoop();
+  void setClosedLoopDesired(bool enable);
+  bool isClosedLoopEnabled() const { return closed_loop_enabled_; }
   bool isConnected() const { return connected_; }
 
   TeensyDriver();
@@ -37,15 +47,24 @@ class TeensyDriver {
   rclcpp::Logger logger_ = rclcpp::get_logger("teensy_driver");
   rclcpp::Clock clock_ = rclcpp::Clock(RCL_ROS_TIME);
 
+  // Serial port mutex for thread safety
+  std::mutex serial_mutex_;
+  bool closed_loop_enabled_ = false;  // mirrors firmware CLOSED_LOOP_ENABLE
+
   // Comms with teensy
   void exchange(std::string outMsg);  // exchange joint commands/state
+  void exchangeWithTimeout(std::string outMsg,
+                           int receive_timeout_ms);  // exchange with timeout
   bool transmit(std::string outMsg, std::string& err);
-  void receive(std::string& inMsg);
-  void sendCommand(std::string outMsg);  // send arbitrary commands
+  bool receive(std::string& inMsg, int timeout_ms);  // read with timeout (ms)
+  void sendCommand(std::string outMsg);              // send arbitrary commands
 
   void checkInit(std::string msg);
   void updateEncoderCalibrations(std::string msg);
   void updateJointPositions(std::string msg);
+
+  /// Drain stale data from the OS serial buffer
+  void drainBuffer();
 };
 
 }  // namespace ar_hardware_interface

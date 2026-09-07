@@ -31,6 +31,8 @@ public:
 
   void stop();
   bool isMoving() const;
+  void enableClosedLoop();
+  void disableClosedLoop();
 
 private:
   bool executeWithTimeout(std::function<bool()> action,

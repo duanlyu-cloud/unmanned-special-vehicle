@@ -19,6 +19,8 @@ public:
 
   bool init(const std::string &yaml_path);
 
+  bool moveHome();
+
 private:
   void handleExecuteTask(
       const std::shared_ptr<robot_interfaces::srv::ExecuteTask::Request> req,
@@ -41,6 +43,7 @@ private:
 
   std::mutex mutex_;
   std::thread task_thread_;
+  rclcpp::TimerBase::SharedPtr home_timer_;
 };
 
 } // namespace task_control

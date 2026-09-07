@@ -72,3 +72,23 @@ bld/
 # NUNIT
 *.VisualState.xml
 TestResult.xml
+
+# Third-party AR4 host application (PyInstaller bundle, ~186MB) - keep out of git
+/ar4_4.3.2应用程序/
+
+# Legacy code snapshot containing a nested .git repository
+/机械臂代码v1.0(任务区动作完成)/
+
+# IDE local settings
+/.vscode/
+
+# AI assistant working memory - not for public release
+**/MEMORY.md
+
+# Internal / cross-project documents - not for public release
+/ros2/移动底盘/
+/docs/香橙派-STM32升降台握手协议技术方案_V1.0.md
+/docs/基于ROS2的工业机械臂任务执行框架设计方案_V1.0.docx
+# Python bytecode
+__pycache__/
+*.pyc

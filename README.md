@@ -1,517 +1,385 @@
-# AR4 六轴机械臂 ROS2 无人化任务执行系统
+# 改装特种车无人化装拆系统 —— 全案总体方案与上游 ROS2 实现
 
-> © 鄂尔多斯翔天飞宇
-
-本项目基于 **ROS2**、**MoveIt2** 与 **ros2_control**，以 AR4 六轴机械臂为核心，面向固定工位工业场景，开发一套机械臂任务执行框架。系统接收执行机械臂主控下发的任务指令，自动完成物料抓取、放置及任务调度，实现固定工位自动化作业。v1.1 起集成移动底盘（滑轨），在任务区与物料区之间往返，实现无人化任务执行。
-
-抓取点与放置点均采用预标定坐标配置，**当前版本不引入视觉定位系统**，以降低实现复杂度、保证运行稳定性。
+> © 鄂尔多斯翔天飞宇　|　本仓库为项目**上游系统（个人技术负责部分）**的公开代码库，并沉淀项目**全案总体方案**
 
 ---
 
-## 1. 项目简介
+## 目录
 
-- **机械臂**：AR4 六轴机械臂（Annin Robotics），6 个 revolute 关节。
-- **控制框架**：ROS2 + MoveIt2 + ros2_control。
-- **任务模式**：接收主控下发的任务指令（`TaskType` + `MaterialID`），自动完成物料抓取、放置与调度。
-- **移动底盘（v1.1）**：滑轨式移动底盘，在任务区与物料区之间往返，实现无人化任务执行。
-- **定位方式**：预标定坐标（YAML 配置），不依赖视觉。
-
----
-
-## 2. 系统组成
-
-### 2.1 硬件
-
-| 部件 | 说明 |
-|------|------|
-| AR4 六轴机械臂 | 6 个 revolute 关节，URDF 描述 + STL mesh |
-| Teensy 4.1 | 电机控制器固件（`ROS2.ino`），6 路 AccelStepper + 编码器（开环），限位开关校准 |
-| Arduino Nano | 辅助控制器（桌面应用 IO 控制） |
-| PS100 伺服底盘（v1.1） | 滑轨式移动底盘，伺服电机驱动 |
-| 传感器 | 关节编码器（AMT-102V 相对编码器）、限位开关 |
-
-> 说明：当前 Teensy 固件中编码器实际读数被注释，位置反馈来自 AccelStepper 内部计数器，系统运行于**开环模式**。步进电机失步时 ROS2 端无法感知实际位置偏差。
-
-### 2.2 软件（ROS2 包）
-
-| Package | 角色 |
-|---------|------|
-| `ar_description` | 机器人 URDF 描述与 STL 模型（已有，复用） |
-| `ar_hardware_interface` | ros2_control 硬件接口 + Teensy 串口驱动（已有，复用） |
-| `ar_moveit_config` | MoveIt2 运动规划配置（SRDF、KDL 运动学、OMPL 规划器）（已有，复用） |
-| `ar_gazebo` | Gazebo 仿真启动（已有，复用） |
-| `robot_interfaces` | 自定义 msg / srv 定义（新增） |
-| `task_control` | 任务管理：TaskManager + MissionScheduler + MaterialManager（新增） |
-| `robot_executor` | 运动执行封装（MoveGroupInterface）（新增） |
-| `bringup` | 统一 Launch 文件 + YAML 配置（新增） |
-| `chassis_control` / `base_controller` | 底盘控制（v1.1 新增） |
+1. [项目定位与仓库范围](#1-项目定位与仓库范围)
+2. [系统总体方案](#2-系统总体方案)
+3. [上游系统（本仓库）](#3-上游系统本仓库)
+4. [下游系统（总体方案，代码不含于本仓库）](#4-下游系统总体方案代码不含于本仓库)
+5. [监控平台（Web + platform_bridge）](#5-监控平台web--platform_bridge)
+6. [测试验证方法论](#6-测试验证方法论)
+7. [快速开始](#7-快速开始)
+8. [日常使用要点](#8-日常使用要点)
+9. [真机调试要点](#9-真机调试要点)
+10. [仓库目录结构](#10-仓库目录结构)
+11. [项目进度与里程碑](#11-项目进度与里程碑)
+12. [协议与版权](#12-协议与版权)
 
 ---
 
-## 3. 软件架构与任务执行框架
+## 1. 项目定位与仓库范围
 
-### 3.1 三层架构
+本项目为 **改装特种车（金杯车无人化装拆系统）全方案制定与上下游全链路实现**：基于金杯车底盘进行整车无人化改装，以 AR4 六轴机械臂为作业核心，集成伺服滑台底盘、三轴调平平台、视觉丝杆定位、升降装置与舵机云台等作业机构，通过 **总控 / 上游 / 下游** 三级控制系统实现"车到位 → 平台调平 → 机械臂自动装拆"的无人化作业闭环。
 
-系统采用三层架构，职责明确：**任务控制 → 动作执行 → 底层驱动**。
+**仓库范围说明**：本项目按揭榜分工组织 —— 全案方案制定与上游系统实现由总设计师个人负责（即本仓库所承载的内容）；下游 STM32 固件、硬件电控与 Web 平台由团队成员按已定稿方案分工实施（代码不在本仓库）。本仓库对外公开的内容包括：
+
+- 上游 ROS2 系统核心源码：机械臂任务调度、闭环运动控制、移动底盘伺服控制（含 ABS 智能恢复）；
+- 系统全案总体方案（本章以下内容，源自《揭榜文档》v4，2026-08-13）；
+- 下游系统、握手协议、监控契约的**方案与指标**（代码由对应分工角色实施）。
+
+> 上游已实现但未包含在本公开仓库的组件（公司内部交付物）：升降台握手 ROS 服务节点、`platform_bridge`（监控桥接）、一键启停 systemd 封装、ESP8266 透明桥固件。其接口契约见下文第 4/5 章。
+
+**项目状态快照**（截至 2026-08-07 节点，源自揭榜文档 v4）：项目总体完成度 **68%** —— 上游核心功能 100% 跑通（机械臂真机 14 步全流程、底盘往返精度实测 0.00mm）；下游分模块闭环攻关中；ESP8266 无线桥已到货烧录，**L0~L3 真机握手实测通过**。
+
+---
+
+## 2. 系统总体方案
+
+### 2.1 三级控制架构
 
 ```text
-执行机械臂主控
-   下发任务(TaskType + MaterialID)
-          │
-          ▼
-┌─────────────────────────────────────────────┐
-│            TaskControl（任务控制层）          │
-│  TaskManager     接收/校验任务，创建 Task     │
-│  MaterialManager 管理位姿与物料（YAML 驱动）  │
-│  MissionScheduler 唯一状态机，流程编排        │
-└─────────────────────────────────────────────┘
-          │ 调用执行动作
-          ▼
-┌─────────────────────────────────────────────┐
-│        RobotExecutor（动作执行层）            │
-│  moveHome / moveJoint / movePose /          │
-│  toolAction / stop                          │
-│  无状态机，仅封装 MoveIt2 调用               │
-└─────────────────────────────────────────────┘
-          ▼
-     MoveIt2（运动规划）
-     MoveGroupInterface（IK / OMPL / 碰撞检测）
-          ▼
-     FollowJointTrajectory Action
-          ▼
-     ros2_control（joint_trajectory_controller）
-          ▼
-     ar_hardware_interface（Teensy 串口 115200bps）
-          ▼
-     AR4 六轴机械臂
+┌────────────────────────────────────────────────────────────┐
+│  总控层：香橙派 5 Ultra（Ubuntu 22.04 + ROS2 Humble，单机）  │
+│  一键启停 / 状态聚合 / Web 监控 / 总调度                      │
+└──────────────────────────┬─────────────────────────────────┘
+                           │ WiFi TCP :9100（ESP8266 无线透明桥 / UART 115200 8N1）
+┌──────────────────────────▼─────────────────────────────────┐
+│  上游层：ROS2 三节点分布式（个人负责，本仓库代码）             │
+│  机械臂任务调度 · 六轴闭环运动控制 · 底盘伺服控制与 ABS 恢复    │
+│  升降台握手（上游侧） · platform_bridge 监控桥接              │
+└──────────────────────────┬─────────────────────────────────┘
+                           │ UART 115200 / RS-485 Modbus RTU 9600
+┌──────────────────────────▼─────────────────────────────────┐
+│  下游层：双 STM32F103VET6 + FreeRTOS                         │
+│  主控 A：高频 IMU 动态 PID 三轴调平                          │
+│  主控 B：丝杆平移（K230 视觉定位）                            │
+│  末端从机（升降装置 + 舵机云台，待实施）                       │
+└────────────────────────────────────────────────────────────┘
 ```
 
-**各层职责**：
+- **部署形态**：总控与上游主控单机部署于香橙派 5 Ultra；ROS2 工作空间 10 个包、三节点分布式架构。
+- **架构原则**：方案与协议先行定稿 → 上下游按契约并行开发 → 无硬件模拟联调 → L0~L4 四层递进真机联调。
 
-| 层级 | 职责 | 对应模块 |
-|------|------|---------|
-| 任务控制层 | 任务接收与校验、物料位姿管理、流程编排与调度 | `TaskManager` + `MaterialManager` + `MissionScheduler` |
-| 动作执行层 | 封装 MoveIt2 调用，提供统一动作接口，不含业务逻辑 | `RobotExecutor` |
-| 底层驱动层 | 运动规划、轨迹执行、硬件通信 | MoveIt2 / ros2_control / `ar_hardware_interface` |
+### 2.2 作业机构与模块清单
 
-**架构设计原则**：
+| 模块 | 机构 | 驱动 / 控制 | 方案状态 | 实施状态 | 实施分工 |
+|------|------|-------------|----------|----------|----------|
+| arm | AR4 六轴机械臂 | Teensy 4.1 + 编码器闭环 | ✅ 已定稿 | ✅ 上游已实现，真机 14 步全流程跑通 | 上游（本仓库） |
+| chassis | PS100 伺服滑台底盘 | RS-485 Modbus RTU 位置模式 | ✅ 已定稿（v3.7） | ✅ 已实现，往返精度实测 0.00mm | 上游（本仓库） |
+| lift | 升降台 | STM32 + 握手协议（TCP 行协议） | ✅ 已定稿（V1.6，L0~L3 真机通过） | ✅ 上游侧已实现；STM32 固件已实现 | 上游 / 固件 |
+| leveling | 三轴调平平台 | STM32 + IMU + 增量式 PID | ✅ 已定稿 | 🚧 物理安装完成，PID 调优中（基本达标） | 方案：上游；实施：硬件电控 + 固件 |
+| k230 | K230 视觉丝杆定位 | STM32 + K230 视觉（0xAA 0x55 帧协议） | ✅ 已定稿 | 🚧 识别与平移链路完成，待实车标定（基本达标） | 方案：上游；实施：固件 |
+| gimbal | 升降装置 + 舵机云台（末端从机） | STM32（协议草案 LVI/KPI/GMI/STBY/ST） | 🚧 协议草案（TBD-3） | ❌ 待实施 | 下游 |
+| — | 激光测距小脑（接驳筒检测） | 激光测距模块 + 导向杆 | 🚧 方案规划 | ❌ 待实施 | 下游 |
 
-- **仅一套状态机**：位于 `MissionScheduler`，负责完整任务流程编排。`RobotExecutor` 无状态机，仅提供同步方法调用。
-- **配置与逻辑分离**：所有位姿和物料信息由 YAML 管理，修改配置无需重新编译。
-- **同步调用模型**：`MissionScheduler` 依次调用 `RobotExecutor` 的同步方法推进流程，调试时断点单步即可跟踪完整流程。
+### 2.3 通信链路与网络拓扑
 
-### 3.2 核心模块交互
-
-```
-task_manager_node (入口)
-    ↓
-TaskManager (服务层) ←→ ROS2 Service (/execute_task, /reset_state)
-    ↓
-MissionScheduler (调度层) → Step 序列构建 + 执行
-    ↓
-RobotExecutor (执行层) → MoveGroupInterface 封装
-    ↑
-MaterialManager (数据层) ← YAML 配置
-```
-
-- **TaskManager**：接收主控下发的任务指令，校验参数合法性（任务类型是否支持、物料 ID 是否在配置范围内），创建 `Task` 对象并发布至 `MissionScheduler`。V1.0 采用**单任务模式**，系统同时仅允许一个任务执行；`Running` 状态时收到新任务直接拒绝（`accepted=false`）。
-- **MissionScheduler**：系统唯一调度中心，承担任务流程编排与生命周期管理。FSM 只管理任务生命周期（`Idle` / `Running` / `Finished` / `Error`），动作步骤是 `Running` 状态内部的顺序函数调用。
-- **MaterialManager**：管理所有物料信息与系统固定位姿，YAML 配置驱动。每种物料同时保存 `pick_pose` 和 `place_pose`，Task1 使用 `pick_pose`，Task2 使用 `place_pose`。
-- **RobotExecutor**：封装 MoveIt2 调用，提供统一动作接口。无状态机，每个方法为同步阻塞调用，返回 `bool`。内置超时保护（默认 10 秒），防止 MoveIt2 规划或执行永久阻塞。
-
-### 3.3 关键接口
-
-**消息定义**：
-
-| 名称 | 类型 | 字段 |
+| 链路 | 规格 | 用途 |
 |------|------|------|
-| `Task.msg` | 消息 | `uint8 task_type` `uint8 material_id` `string task_id` |
-| `TaskResult.msg` | 消息 | `string task_id` `uint8 result_code` `string message` |
+| Web 监控 | REST / WebSocket，`:8080` | 监控平台，状态推送周期 1s，Web 侧零 ROS2 依赖 |
+| 上下游无线握手 | WiFi TCP `:9100`，ASCII 行协议 ≤128B | 上游 ↔ STM32 升降台（经 ESP8266 无线透明桥，UART 115200 8N1） |
+| 底盘伺服 | RS-485 Modbus RTU `9600` | 上游 ↔ PS100 伺服驱动器（位置模式） |
+| 机械臂 | UART `115200` 8N1 | 上游 ↔ Teensy 4.1（MT/JP/JC/SS/CL 指令） |
+| 下游内部 | UART/USART `115200` | IMU（USART2）、K230 视觉（USART3，PD8/PD9 全重映射） |
 
-`task_type` 常量（定义于 `Task.msg`）：`1`= `TASK_TYPE_MATERIAL_PICK`（取料），`2`= `TASK_TYPE_TASK_UNLOAD`（卸料）。
+网络端口约定：Web `:8080`、握手 TCP `:9100`；供电与线缆规范、握手协议与监控接口契约见全案方案文档体系（公司内部，本文档为公开摘要）。
 
-`TaskResult.result_code`：`0`=成功，`1`=物料未找到，`2`=未知任务类型，`3`=执行失败。
+### 2.4 上下游握手协议（TCP 行协议，V1.6 / 版本 0.1.0）
 
-**服务定义**：
+- **报文格式**：ASCII 行协议，单行 ≤128B；上行指令 `STA` / `T1GO` / `T1DONE` / `T2DONE` / `ERRxx`，应答如 `STAA1B0.1.0`（协议版本 0.1.0）。
+- **时序约束**：握手应答超时 5s；断线每 2s 自动重连并重新握手；无线链路延迟 10~50ms。
+- **状态完整性规则**：以"状态完整性"约束上下游状态机（`WAIT_STA → READY → T1_RUNNING → READY`），杜绝半握手/状态错乱。
+- **四层递进联调法（L0~L4）**：
+  - L0：STM32 单板协议自测；
+  - L1：传输链路（ESP8266 桥 / 网络）；
+  - L2：链路握手（`STA → STAA1B0.1.0`）；
+  - L3：ROS 节点联调（`/lift/handshake` OK + READY）；
+  - L4：全流程（task1 → task2）。
+- 无线桥方案经**双无线方案比选**后定稿：ESP8266 透明桥多客户端版 V1.1（≤4 TCP 连接互不顶断），双向透传、断线自动重连。
 
-| 名称 | 类型 | 请求 | 响应 |
-|------|------|------|------|
-| `ExecuteTask.srv` | 服务 | `Task task` | `bool accepted` `string message` |
-| `ChassisMove.srv` | 服务（v1.1） | `string station_id`（目标站点，定义于 waypoints.yaml） | `bool success` `float64 actual_position`(mm) `int32 error_code`(0=OK/1=timeout/2=alarm/3=modbus_error) `string message` |
+### 2.5 状态模型与统一错误码
 
-**其他服务/话题**：
-
-| 名称 | 类型 | 说明 |
-|------|------|------|
-| `/execute_task` | `robot_interfaces/srv/ExecuteTask` | 发送任务 |
-| `/reset_state` | `std_srvs/srv/Trigger` | 重置状态（Error/Finished → Idle） |
-| `/task_result` | `robot_interfaces/msg/TaskResult` | 任务结果话题 |
-
-> 注：设计方案 V1.0 中错误恢复服务名为 `/reset_error`，实际实现（AGENTS.md / v1.0 技术方案）使用 `/reset_state`。两者均为 `std_srvs/srv/Trigger`。
-
-### 3.4 任务类型与动作流程
-
-**任务类型**（代码常量见 `Task.msg`；设计文档曾以"放任务 / 取任务"命名，方向语义请以真机验证为准）：
-
-- **task_type=1（`TASK_TYPE_MATERIAL_PICK`，文档称"放任务"）**：任务区与物料区往返动作，完整流程如下。
-- **task_type=2（`TASK_TYPE_TASK_UNLOAD`，文档称"取任务"）**：与任务 1 完全镜像。
-
-**Task 1 — 取料任务（12 步）**：
-
-```
-任务区 (6步):
-1. Home (关节)
-2. task_point_A (关节)
-3. task_cartesian_path_forward (笛卡尔直线: A → task_pose)
-4. task_cartesian_path_reverse (笛卡尔直线: task_pose → B)
-5. task_point_B (关节)
-6. Home (关节)
-
-物料区 (6步，material_id 决定左右):
-7. Home (关节)
-8. 沿 forward_points 逐点关节移动 (na, nb, …)
-9. material_cartesian_path_forward (笛卡尔直线: 末航点 → material_pose)
-10. material_cartesian_path_reverse (笛卡尔直线: material_pose → return_point)
-11. return_point (关节, nc)
-12. Home (关节)
-```
-
-> 注：任务区/物料区的具体航点（task_point_A/B、na/nb/nc、material_pose、task_pose）与夹爪动作时机均以 `task_control/config/poses.yaml` 及 `mission_scheduler.cpp` 实际代码为准，上图仅为流程结构示意。
-
-**Task 2 — 卸料任务（与 Task 1 完全镜像，12 步）**：
-
-```
-物料区 (6步):
-1. Home (关节)
-2. return_point (关节, nc)
-3. material_cartesian_path_reverse 反向 (笛卡尔直线: nc → material_pose)
-4. material_cartesian_path_forward 反向 (笛卡尔直线: material_pose → 航点)
-5. 沿 forward_points 反向逐点关节移动 (…, nb, na)
-6. Home (关节)
-
-任务区 (6步):
-7. Home (关节)
-8. task_point_B (关节)
-9. task_cartesian_path_reverse 反向 (笛卡尔直线: B → task_pose)
-10. task_cartesian_path_forward 反向 (笛卡尔直线: task_pose → A)
-11. task_point_A (关节)
-12. Home (关节)
-```
-
-> 注：设计方案 V1.0 中任务流程为 `Home → PickPose → ToolClose → Home → TaskPose → ToolOpen → Home`（Task1 物料抓取）与 `Home → TaskPose → ToolClose → Home → PlacePose → ToolOpen → Home`（Task2 任务点卸料），与上述 12 步流程在动作语义上一致，但步骤划分与命名不同。实际实现以 12 步流程为准。
-
-### 3.5 姿态配置文件（poses.yaml）
-
-所有位姿和物料参数采用 YAML 配置，修改无需重新编译。结构如下：
-
-```yaml
-# task_control/config/poses.yaml
-home_pose:
-  joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-
-task_pose:
-  joints: [0.5, -0.3, 0.8, 0.0, 1.2, 0.0]
-
-# 末端工具参数（V1.0 通过 joint_6 角度模拟）
-tool:
-  open_angle: 0.0    # joint_6 打开角度 (rad)
-  close_angle: 1.57  # joint_6 闭合角度 (rad)
-
-materials:
-  material1:
-    name: "物料A"
-    pick_pose:
-      joints: [0.3, -0.5, 0.6, 0.0, 1.0, 0.0]
-    place_pose:
-      joints: [0.4, -0.4, 0.7, 0.0, 1.1, 0.0]
-    tool_open_angle: 0.0    # 可选，覆盖全局默认值
-    tool_close_angle: 1.57  # 可选，覆盖全局默认值
-```
-
-实际实现（v1.0 技术方案）中，任务区与物料区使用 `task_point_A` / `task_point_B` / `task_pose` / `task_cartesian_path_forward` / `task_cartesian_path_reverse`，物料使用 `material_pose` / `forward_points`（na, nb, ...）/ `return_point`（nc）/ `material_cartesian_path_forward` / `material_cartesian_path_reverse`。
-
-> ⚠️ 上表 yaml 中的数值仅为**格式示意**，非真实标定值。真机标定坐标以 `task_control/config/poses.yaml` 为准（当前为 2026-07-30 实测版本），代码中相关配置示例：`task_point_A: [1.5999, 0.1382, 0.5016, 0.0122, -0.6241, -0.1449]`、`task_point_B: [1.6062, 0.7449, -1.0642, 0.0057, 0.1703, -0.1432]`、`task_pose.joints: [1.6023, 0.7251, -0.4418, 0.0242, -0.2696, -0.1151]`。标定值会随现场调试更新，修改配置无需重新编译。
+- **六大模块统一状态模型**：8 状态枚举（含 STOPPED / STARTING / INITIALIZING / READY / RUNNING / ERROR 等，用于一键启停流转与监控展示）。
+- **统一错误码**：8 类（覆盖超时、通信、报警、协议错误等，服务响应与 Web 共用同一套语义）。
 
 ---
 
-## 4. 快速开始
+## 3. 上游系统（本仓库）
 
-### 4.1 环境
+### 3.1 ROS2 包架构
 
-- **ROS2 发行版**：设计方案 V1.0 与上游 `src/README.md` 标注为 **ROS2 Iron（Ubuntu 22.04）**；移植计划中目标平台为香橙派（Orange Pi 5, Ubuntu ARM64）上的 **ROS2 Humble**。请以实际部署环境为准。
-- 依赖：MoveIt2、ros2_control、rosdepc 工具。
+| Package | 角色 | 说明 |
+|---------|------|------|
+| `ar_description` | 机器人描述 | URDF + STL mesh（复用上游 AR4） |
+| `ar_hardware_interface` | 硬件驱动 | ros2_control 硬件接口 + Teensy 串口驱动（复用上游 AR4，按需修改） |
+| `ar_moveit_config` | 运动规划 | MoveIt2：SRDF、KDL 运动学、OMPL 规划器 |
+| `ar_gazebo` | 仿真 | Gazebo 启动 |
+| `robot_interfaces` | 接口定义 | Task / TaskResult msg，ExecuteTask / ChassisMove srv |
+| `task_control` | 任务控制层 | TaskManager + MissionScheduler + MaterialManager（系统唯一状态机） |
+| `robot_executor` | 动作执行层 | MoveGroupInterface 封装，无状态机，同步调用 + 超时保护 |
+| `chassis_control` | 底盘控制 | PS100 伺服驱动（Modbus RTU）+ `/chassis/move_to` 服务 + ABS 恢复 |
+| `bringup` | 启动 | real / gazebo 一键 launch + 参数 |
 
-### 4.2 构建
+设计原则：**仅一套状态机**（MissionScheduler）；**配置与逻辑分离**（全部位姿/站点 YAML 驱动）；**同步调用模型**（顺序函数调用推进流程，便于断点调试）。
+
+### 3.2 任务调度与状态机（task_control）
+
+- 服务：`/execute_task`（`robot_interfaces/srv/ExecuteTask`）、`/reset_state`（`std_srvs/srv/Trigger`）。
+- 任务类型（`Task.msg` 常量）：`task_type=1` = `TASK_TYPE_MATERIAL_PICK`（放料任务），`task_type=2` = `TASK_TYPE_TASK_UNLOAD`（取料任务）；参数 `material_id` 决定左/右物料位。
+- 系统唯一状态机：`Idle / Running / Finished / Error`；单任务模式，Running 期间新任务直接拒绝（`accepted=false`）。
+- **就绪门禁**：`joint_states` 新鲜度校验，校准期间拒绝任务下发。
+- 任务编排为级联步骤序列（随版本演进：v1.0 为 12 步动作序列，v1.1 引入底盘移动后扩展；揭榜联调口径 Task1/Task2 各 **14 步**真机全流程跑通）。实际序列在 `mission_scheduler.cpp` 中按配置构建，运行时打印 `Executing N steps`，每步带日志与超时保护。
+- 任务结果经 `/task_result`（`TaskResult.msg`）发布：`result_code` 0=成功 / 1=物料未找到 / 2=未知任务类型 / 3=执行失败。
+
+### 3.3 机械臂闭环执行层（robot_executor + ar_hardware_interface）
+
+- 动作接口：`moveHome` / `moveJoint`（moveJointPath）/ `moveCartesianPath`；末端 link `link_6`，参考系 `base_link`。
+- **闭环运动控制**：编码器反馈 + 丢步自动补偿（闭环自动切换），Teensy 固件含校准流程（`REST_ENC_POSITIONS`、限位开关归零）。
+- 保护机制：单步执行超时 60s（`executeWithTimeout`）；笛卡尔路径完成率 < 90% 自动重试 3 次（间隔 100ms），重试前等待最新关节状态（`waitForFreshJointState`，500ms）。
+- 关键执行参数（源码为准）：
+
+| 参数 | 当前值 |
+|------|--------|
+| Home/关节移动 速度、加速度缩放 | 0.5 |
+| 笛卡尔路径 速度、加速度缩放 | 0.15 |
+| 笛卡尔路径步长 / 最小完成度 | 0.03 m / 90%（重试 3 次） |
+| 单步执行超时 | 60 s |
+
+- 关节硬限位（URDF）：j1 ±170°、j2 −36°~96°、j3 −89°~52°、j4 ±165°、j5 ±105°、j6 ±155°（实际运动另受 MoveIt `joint_limits.yaml` 约束）。
+
+### 3.4 移动底盘控制（chassis_control）
+
+- 机构：PS100 伺服驱动器 + 丝杆（5mm/rev，10000 脉冲/圈），行程 0~1010mm（软限位）。
+- 服务：`/chassis/move_to`（`robot_interfaces/srv/ChassisMove`，请求 `station_id` → 目标站点来自 `waypoints.yaml`；120s 超时；定位误差 ≤2mm 判成功；实测往返精度 **0.00mm**）。
+- **ABS 三阶段鲁棒恢复**：重试 → P3-37 参数重初始化 → 微动唤醒；`Err29` 堵转自动恢复。
+- 智能启动：断电重启 ABS 恢复秒级启动；标定文件防污染保存；站点标定（0/990mm 标定完成）。
+- 关键指标：990mm 往返 ≈61s @200rpm；MVP 目标误差 ≤10mm，实际达标（≤2mm 判定，实测 0.00mm）。
+
+### 3.5 关键接口定义（robot_interfaces）
+
+```text
+Task.msg        : uint8 task_type | uint8 material_id | string task_id
+TaskResult.msg  : string task_id | uint8 result_code | string message
+ExecuteTask.srv : robot_interfaces/Task task  --->  bool accepted | string message
+ChassisMove.srv : string station_id            --->  bool success
+                      | float64 actual_position (mm) | int32 error_code
+                      (error_code: 0=OK 1=timeout 2=alarm 3=modbus_error)
+                      | string message
+```
+
+| 服务 / 话题 | 类型 | 说明 |
+|-------------|------|------|
+| `/execute_task` | ExecuteTask | 任务下发（task_type + material_id + task_id） |
+| `/reset_state` | std_srvs/Trigger | Error/Finished → Idle 重置 |
+| `/chassis/move_to` | ChassisMove | 底盘移动到命名站点 |
+| `/task_result` | TaskResult | 任务结果话题 |
+
+### 3.6 姿态与站点配置（YAML 驱动）
+
+- `task_control/config/poses.yaml`：`home_pose` / `task_point_A/B` / `task_pose` / `task_cartesian_path_forward|reverse`（笛卡尔航点）/ `materials.*`（`material_pose`、`forward_points`、`return_point`、`material_cartesian_path_forward|reverse`）。
+- `chassis_control/config/waypoints.yaml`：底盘站点（task_station / material_station）。
+- 全部位姿为**预标定坐标**（当前为实车实测版），修改配置无需重新编译；示教/标定方法见第 9 章。示例结构（数值仅为格式示意，非真实标定值）：
+
+```yaml
+home_pose: { joints: [0, 0, 0, 0, 0, 0] }
+task_point_A: [1.5999, 0.1382, 0.5016, 0.0122, -0.6241, -0.1449]   # 2026-07-30 实测示例
+task_pose:    { joints: [1.6023, 0.7251, -0.4418, 0.0242, -0.2696, -0.1151] }
+materials:
+  material1:
+    name: "Material L1"
+    material_pose: [...]      # 物料位姿（左右物料各一份）
+    forward_points: [[...], ...]   # na, nb, ...
+    return_point:  { joints: [...] }  # nc
+```
+
+---
+
+## 4. 下游系统（总体方案，代码不含于本仓库）
+
+> 下游方案由总设计师提出并定稿；STM32 固件、硬件电控与接线调试由团队成员按方案实施（分工见 2.2 表）。此处仅沉淀方案与指标摘要。
+
+### 4.1 双 STM32 分工架构（FreeRTOS）
+
+- **主控 A**：专职高频 IMU 动态 PID 三轴调平（USART2 采集，115200）；
+- **主控 B**：负责丝杆平移（K230 视觉定位联动）。
+- FreeRTOS 多任务：10ms 姿态控制任务 + 200ms 调试打印任务，Systick 1ms 基准。
+
+### 4.2 升降台（STM32 固件 + 握手协议 V1.6）
+
+- 协议状态机：`WAIT_STA → READY → T1_RUNNING → READY`；应答格式经 L0/L2 真机验证（`STA → STAA1B0.1.0`）。
+- 与上游的联动：task1 放料 / task2 取料时序由握手协议保证（上游侧服务：`/lift/task1_send`、`/lift/task1_wait`、`/lift/task2_done`、`/lift/handshake`，状态话题 `/lift/status` —— 该组节点属公司内部交付，不在本仓库）。
+
+### 4.3 ESP8266 无线透明桥（V1.1）
+
+- 多客户端（≤4 TCP 连接互不顶断）；UART 115200 8N1 双向透传；断线自动重连；已烧录并实测连通（TCP :9100，L1/L2 通过）。
+
+### 4.4 三轴调平平台（关键指标）
+
+| 指标 | 值 |
+|------|-----|
+| 姿态采样率 / 控制周期 | 100Hz（10ms） |
+| 姿态解算 | 卡尔曼 + 低通滤波；IMU 上电自动采集 1000 样本零偏校准（Flash 存储） |
+| 控制算法 | 增量式 PID；姿态死区 0.5°；单周期输出限幅 ±20mm |
+| 机构 | 3 台电机 120° 均布圆盘；三电机逆运动学解算同步步进 |
+| 传动 | 400 细分 × 4mm 导程 → 脉冲当量 0.02mm/脉冲；行程 −1000~+8000 步 |
+| 电机 | 默认 100Hz，31~500Hz 可调；换向冷却 50ms |
+| IMU 量程 | 加速度 ±16g（1LSB≈0.488mg），陀螺 ±2000°/s |
+| 姿态输出 | Roll/Pitch/Yaw 精度 0.1° |
+| 保护机制 | 微动开关触碰归零 + 预升 3000 脉冲机制 |
+
+验收口径：任意 ±15° 倾斜回正至 ±0.5° 以内。
+
+### 4.5 K230 视觉丝杆定位（关键指标）
+
+| 指标 | 值 |
+|------|-----|
+| 通讯 | USART3（PD8/PD9 全重映射），115200，0xAA 0x55 自定义帧协议 |
+| 识别 | AprilTag；通讯超时 500ms 无有效帧自动切回搜索 |
+| 两段式控制 | 无目标快速扫描搜索（800µs 脉冲间隔，187.5 转/分）→ 识别后慢速追踪微调（2500~8000µs，18.8~60 转/分） |
+| 闭环 | 像素误差 → 速度线性映射；一阶 IIR 低通滤波（系数 0.3 可调）；追踪死区 ±8~15 像素可调 |
+| 步进控制 | 梯形加减速（2µs/ms）+ DWT 微秒级脉冲（1µs 分辨率）+ 换向冷却 50ms（400 细分） |
+| 追踪精度 | 追踪误差 < 15 像素 |
+
+### 4.6 待实施模块（方案已预留）
+
+- **下游末端从机系统**（升降装置 + 舵机云台）：协议扩展草案已提出（`LVI` / `KPI` / `GMI` / `STBY` / `ST` 命令集，行协议风格与现有协议一致），待下游评审定稿后实施；链路复用 ESP8266 透明桥，与上游经 `/lift/module_init` 服务对接。
+- **激光测距小脑**：激光测距模块物理固接 + 电控实现，产出附有激光传感器的导向杆，判断挂载是否完整进入接驳筒。
+
+---
+
+## 5. 监控平台（Web + platform_bridge）
+
+- **契约（V1.3 已对齐）**：REST / WebSocket，端口 `:8080`；系统状态模型 8 状态枚举；统一错误码 8 类；状态推送周期 1s。
+- **platform_bridge（上游已实现，公司内部交付）**：按契约封装全部 ROS2 接口；状态聚合 JSON 周期推送；`--simulate` 模拟模式支持无硬件先行联调。
+- **Web 端**：零 ROS2 依赖，纯接口对接；一键启停与单模块初始化语义见契约。
+- 当前状态：platform_bridge 与 Web 待实施收尾（bridge：上游；Web：软件团队）。
+
+---
+
+## 6. 测试验证方法论
+
+1. **单元/集成测试**：任务步骤序列 gtest 4 用例；底盘 ABS 恢复回归测试 pytest 13 用例。
+2. **握手链路自测**：5 场景（happy / err / silent / disconnect / integrity）；TCP 链路自测。
+3. **无硬件模拟联调**：STM32 模拟器（`--fail-mode`）+ bridge 模拟模式（`--simulate`），下游与 Web 侧不依赖真机即可开发联调。
+4. **真机四层递进测试 L0~L4**：单板协议 → 传输链路 → 链路握手 → ROS 节点 → 全流程（task1 → task2）。
+5. **实景测试**：实车参数细化与现场实测（机械臂轨迹微调、K230 识别距离二次标定、升降云台实地对接）；故障注入与自愈（拔电重连、断线重连）。
+
+---
+
+## 7. 快速开始
+
+### 7.1 环境
+
+- ROS2 Humble（Ubuntu 22.04，香橙派 5 Ultra / x86 均可）；MoveIt2、ros2_control、rosdep。
+- Teensy 4.1 固件：`ros2/ROS2_Teensy4.1烧录固件/ROS2/ROS2.ino`（Arduino 环境编译烧录）。
+
+### 7.2 构建与启动
 
 ```bash
-# 在仓库 ros2/ 目录（colcon 工作空间根）下执行
-colcon build --packages-select bringup robot_executor task_control ar_moveit_config
+# 构建（ros2/ 为 colcon 工作空间）
+cd ros2
+colcon build --packages-select bringup robot_executor task_control chassis_control ar_moveit_config
 source install/setup.bash
-```
 
-### 4.3 启动
-
-**仿真模式**：
-
-```bash
+# 仿真
 ros2 launch bringup gazebo_bringup.launch.py
-```
 
-**真机模式**：
-
-```bash
-# serial_port: Teensy 4.1 串口，默认 /dev/ttyACM0；calibrate: 启动时是否校准，默认 True
-# 按实际硬件接线可用 serial_port:=/dev/ttyUSB0 覆盖
+# 真机（serial_port: Teensy 串口，默认 /dev/ttyACM0；calibrate: 启动校准，默认 True）
 ros2 launch bringup real_bringup.launch.py serial_port:=/dev/ttyACM0 calibrate:=True
+
+# 仅底盘（PS100）
+ros2 launch chassis_control chassis_bringup.launch.py
 ```
 
-> 注：设计方案 V1.0 与目录结构文档中规划的一键启动文件为 `bringup/launch/system.launch.py`，实际实现使用 `gazebo_bringup.launch.py` 与 `real_bringup.launch.py`。
-
-**上游 AR4 驱动启动参数**（`ar_hardware_interface`）：
-
-- `calibrate`：是否对机械臂进行校准（确定每个关节的绝对位置）。
-- `include_gripper`：是否包含伺服夹爪，默认 `True`。
-- `serial_port`：Teensy 板串口，默认 `/dev/ttyACM0`。
-- `arduino_serial_port`：Arduino Nano 板串口，默认 `/dev/ttyUSB0`。
-
-> 注：真机调试记录中 `real_bringup.launch.py` 曾使用串口 `/dev/ttyUSB0`，与上游默认值（Teensy 为 `/dev/ttyACM0`）存在差异，请按实际硬件连接配置。
-
-**MoveIt 演示**（RViz 中规划，不含真实/模拟臂）：
+### 7.3 常用调试命令
 
 ```bash
-ros2 launch ar_moveit_config demo.launch.py
-```
-
-**Gazebo 仿真 + MoveIt**：
-
-```bash
-ros2 launch ar_gazebo ar_gazebo.launch.py
-ros2 launch ar_moveit_config ar_moveit.launch.py use_sim_time:=true include_gripper:=True
-```
-
-### 4.4 Docker（可选）
-
-`ros2/` 目录提供 `Dockerfile` 与 `run_in_docker.sh`。需要 NVIDIA GPU 及 NVIDIA 容器工具包：
-
-```bash
-docker build -t ar4_ros_driver .
-./run_in_docker.sh
-```
-
-### 4.5 调试命令
-
-```bash
-# 发送任务 1（task_type=1: 取料 MATERIAL_PICK）
+# 任务下发（task_type=1 放料 / 2 取料）
 ros2 service call /execute_task robot_interfaces/srv/ExecuteTask "{task: {task_type: 1, material_id: 1, task_id: 'test_001'}}"
-
-# 发送任务 2（task_type=2: 卸料 TASK_UNLOAD）
-ros2 service call /execute_task robot_interfaces/srv/ExecuteTask "{task: {task_type: 2, material_id: 1, task_id: 'test_002'}}"
-
-# 重置状态
+# 状态重置
 ros2 service call /reset_state std_srvs/srv/Trigger
-
-# 查看末端笛卡尔坐标
+# 底盘移动
+ros2 service call /chassis/move_to robot_interfaces/srv/ChassisMove "{station_id: 'task_station'}"
+# 位姿查看
 ros2 run tf2_ros tf2_echo base_link link_6
-
-# 查看关节状态
 ros2 topic echo /joint_states --once
 ```
 
 ---
 
-## 5. 日常使用要点
+## 8. 日常使用要点
 
-> 以下内容摘自《使用手册 v1.2》。该手册主体为上游 AR3/AR4 桌面控制应用（ARCS）与 AR3 ROS1 环境的操作说明，与本项目 ROS2 框架相关的要点如下。
-
-### 5.1 通讯
-
-- 确定 Teensy 4.1 与 Arduino Nano 的通信端口（Windows 设备管理器或 Arduino IDE 工具菜单 → 端口），在设备"端口号"输入字段中设置。只需设置一次，软件会记住 COM 端口。
-
-### 5.2 速度 / 加速 / 减速
-
-- 机器人速度设置为最大速度的百分比。速度 100 为最快。低速典型值在 **10% 到 25%** 之间。
-- 加速和减速各有 2 个参数：**持续时间**（移动百分比）与**百分比**（幅度度量）。例如 100mm 移动，前 5mm 内快速加速可设 Dur=5；最后 25mm 内缓慢停止可设减速 Dur=25。
-
-### 5.3 运行（点动）
-
-- 在"点动度数"框输入移动度数，按对应"-"或"+"按钮移动每个关节。
-- 关节模式：可选中"步进关节"单选按钮按电机步进点动。
-- 笛卡尔坐标点动：输入移动距离（毫米），按"-"或"+"点动。
-- 工具坐标点动：根据夹具微动。
-- Xbox 控制器慢跑：3 种模式（关节、笛卡尔、重定向），D 垫控制方向，X 键切换关节组，A 键切笛卡尔，B 键控制方向，Y 键示教位置，开始按钮开/关第一个 DO（典型用于开闭夹持器）。
-
-### 5.4 编程（桌面应用）
-
-- **Move J**：关节移动，所有关节共同完成的扫掠运动，最简单常用。
-- **Move L**：线性移动，执行完美直线到示教位置。
-- **Move A**：弧形移动，需示教 3 个点（起点 / 中点 / 终点）。
-- **Move C**：圆形移动，需示教 3 个点（中心 / 起点 / 平面点）。
-- **Move SP**：存储位置，寄存器选项卡可设置 16 个存储位置（X, Y, Z, Y, P, R）。
-- **OFFS SP**：移动到存储位置并偏移另一存储位置的值，适合按行堆叠放置。
-- **Teach SP**：将当前位置存储到存储位置寄存器。
-- 暂停：等待时间 / 等待输入 / 等待输入关闭。
-- IO：设置输出打开/关闭（Arduino 可用 IO 引脚 14-19）。
-- 导航：可创建多个程序例程，支持调用程序 / 返回 / 创建选项卡 / 跳转到选项卡 / If Register Jump。
-- 寄存器：设置静态值或递增（`++1`）/ 递减（`--1`）。
-
-### 5.5 校准（桌面应用）
-
-- **强制校准**：强制在每个轴的中点校准，仅在构建和设置期间使用。
-- **精细校准**：设置参考位置以检查校准真实性（弯曲限位开关或更换部件后）。示教参考位置 → 转到精校准位置检查精度 → 小步点动校正 → 执行精校准。
-- **方向默认值**：校准默认设置在安装限位开关的轴的一侧，6 个值（每关节一个），只能为"0"或"1"。
-- **机器人校准值**：输入每个关节的运动自由度及步进电机步数。
-
-### 5.6 任务下发与坐标概念
-
-- 任务通过 `/execute_task` 服务下发，参数为 `task_type`（1=放任务，2=取任务）与 `material_id`。
-- 系统位姿（Home、task_point_A/B、task_pose、物料位姿）均为预标定坐标，配置于 `poses.yaml`。
-- 末端 link 为 `link_6`（不是 `tool0`），根 link 为 `base_link`。
+- **任务下发**：`/execute_task`，参数 `task_type`（1=放料 / 2=取料，常量见 `Task.msg`）与 `material_id`（左/右物料）。任务执行期间系统拒绝新任务；异常后调用 `/reset_state` 复位。
+- **校准时机**：Teensy 重新上电 / 刷写固件后必须校准；仅重启软件可 `calibrate:=False` 跳过。校准耗时 3~5 分钟。
+- **就绪门禁**：关节状态未刷新或处于校准期时任务会被拒绝（`accepted=false`），属正常保护。
+- **底盘 ABS**：断电重启后首次移动前触发 ABS 恢复（秒级）；`Err29` 堵转由驱动自动恢复，无需人工干预。
+- **急停**：见公司内部操作规范（一键启停 systemd 单元封装，状态流转 STOPPED→STARTING→INITIALIZING→READY）。
 
 ---
 
-## 6. 真机调试要点
+## 9. 真机调试要点
 
-### 6.1 校准流程
-
-- 向 Teensy 板刷新固件，以及为机械臂 / Teensy 板断电重新上电后，**需要进行校准**。
-- 校准可通过启动参数 `calibrate:=False` 跳过（仅重启软件但未重启 Teensy 时，编码器保持供电，无需重新校准）。
-- 原始编码器（AMT-102V）为**相对编码器**，上电时需对照限位开关校准。
-- 也可修改 Teensy 固件中的 `REST_ENC_POSITIONS` 值，使编码器在启动时初始化为该值（前提是机械臂始终在该位置初始化）。
-- 开始任何运动前，建议在 RViz 中检查模型是否处于合理位置，以验证编码器校准正确。
-
-### 6.2 编码器与限位开关检查
-
-- 编码器为相对编码器，依赖限位开关确定绝对位置。
-- 限位开关弯曲或更换机械部件后，需通过"精细校准"重新验证校准真实性。
-- 当前固件编码器实际读数被注释，位置反馈来自 AccelStepper 内部计数器（开环模式）。
-
-### 6.3 串口 / Teensy 注意事项
-
-- Teensy 4.1 固件：`ROS2_Teensy4.1烧录固件/ROS2/ROS2.ino`。
-- `ar_hardware_interface` 串口连接失败时已有优雅错误处理（`connected_` 检查）。
-- 串口通信协议：`MT` / `JP` / `ST` / `JC` / `SS` 指令，115200bps。
-- 若未启用串口访问，需执行 `sudo addgroup $USER dialout` 并注销重新登录。
-
-### 6.4 常见问题与解决方案
-
-| 问题 | 解决方案 |
-|------|----------|
-| 笛卡尔路径速度不一致 | 笛卡尔移动统一通过 `setMaxVelocityScalingFactor` / `setMaxAccelerationScalingFactor` 设置（当前 0.15） |
-| KDL 求解器超时 | 超时设置需 ≥50ms，否则 `computeCartesianPath` IK 失败 |
-| 关节状态过时 | `moveCartesianPath` 调用前等待关节状态更新（`waitForFreshJointState`） |
-| joint_state_broadcaster QoS 不匹配 | 使用 `TRANSIENT_LOCAL` QoS，subscriber 必须匹配 |
-| 串口连接失败 | `ar_hardware_interface` 已添加 `connected_` 检查，优雅处理 |
-
-### 6.5 关节角度范围
-
-| 关节 | 下限 | 上限 | 说明 |
-|------|------|------|------|
-| joint_1 | -170° | 170° | 腰部旋转 |
-| joint_2 | -36° | 96° | 肩部 |
-| joint_3 | -89° | 52° | 肘部 |
-| joint_4 | -165° | 165° | 腕部旋转 |
-| joint_5 | -105° | 105° | 腕部俯仰 |
-| joint_6 | -155° | 155° | 法兰旋转 |
-
-> 注：以上限位取自 `ar_description/urdf/ar_macro.xacro`，为 URDF 中的硬限位；实际运动还受 MoveIt 配置（`joint_limits.yaml`）约束。
-
-### 6.6 运动执行参数
-
-| 参数 | 当前值 | 来源 |
-|------|--------|------|
-| Home / 关节移动 速度与加速度缩放 | 0.5 | `robot_executor.cpp` |
-| 笛卡尔路径 速度与加速度缩放 | 0.15 | `robot_executor.cpp` `moveCartesianPath` |
-| 笛卡尔路径步长 | 0.03 m | `computeCartesianPath` |
-| 笛卡尔最小完成度 | 90%（不足则重试，最多 3 次，间隔 100ms） | `robot_executor.cpp` |
-| 单步执行超时 | 60 s | `RobotExecutor::timeout_` |
-| 笛卡尔前关节状态新鲜度等待 | 500 ms | `waitForFreshJointState` |
+| 主题 | 要点 |
+|------|------|
+| 编码器 | AMT-102V 为**相对编码器**，依赖限位开关确定绝对位置；限位开关弯曲或更换部件后需"精细校准" |
+| 串口权限 | `sudo addgroup $USER dialout` 后注销重登 |
+| Teensy 协议 | `MT` / `JP` / `ST` / `JC` / `SS` / `CL` 指令，115200bps |
+| 笛卡尔路径速度 | 缩放系数统一设置（当前 0.15），避免各段速度不一致 |
+| KDL 超时 | IK 求解超时设置需 ≥50ms |
+| 关节状态过时 | 笛卡尔前先 `waitForFreshJointState` |
+| QoS | joint_state_broadcaster 使用 `TRANSIENT_LOCAL`，订阅端必须匹配 |
+| 常见故障 | 串口连接失败有 `connected_` 优雅检查；笛卡尔完成率 <90% 自动重试 |
 
 ---
 
-## 7. 目录结构（简版）
+## 10. 仓库目录结构
 
 ```text
-arm/
-├── ros2/                                    # ROS2 工作空间根目录
+├── LICENSE / README.md
+├── ros2/                                   # colcon 工作空间
 │   ├── src/
-│   │   ├── ar_description/                  # （已有）机器人描述（URDF + STL mesh）
-│   │   ├── ar_hardware_interface/           # （已有）硬件驱动（ros2_control + Teensy 串口）
-│   │   ├── ar_moveit_config/                # （已有）MoveIt2 配置
-│   │   ├── ar_gazebo/                       # （已有）Gazebo 仿真
-│   │   ├── robot_interfaces/                # （新增）msg / srv 定义
-│   │   │   ├── msg/  (Task.msg, TaskResult.msg)
-│   │   │   └── srv/  (ExecuteTask.srv)
-│   │   ├── task_control/                    # （新增）任务控制
-│   │   │   ├── config/poses.yaml            # Home / TaskPose / Materials
-│   │   │   └── src/  (task_manager_node.cpp, mission_scheduler.cpp, material_manager.cpp)
-│   │   ├── robot_executor/                  # （新增）执行层（MoveIt2 封装）
-│   │   └── bringup/                         # （新增）启动
-│   │       └── launch/                      # gazebo_bringup.launch.py / real_bringup.launch.py
-│   ├── ROS2_Teensy4.1烧录固件/              # （已有）Teensy 固件（ROS2/ROS2.ino）
-│   ├── Dockerfile                           # （已有）
-│   └── run_in_docker.sh                     # （已有）
-└── ar4_4.3.2应用程序/                       # （已有）桌面控制应用，与 ROS2 无关
+│   │   ├── ar_description/                 # URDF + STL（上游复用）
+│   │   ├── ar_hardware_interface/          # ros2_control + Teensy 串口（上游复用）
+│   │   ├── ar_moveit_config/               # MoveIt2（上游复用）
+│   │   ├── ar_gazebo/                      # Gazebo 仿真（上游复用）
+│   │   ├── robot_interfaces/               # Task/TaskResult/ExecuteTask/ChassisMove
+│   │   ├── task_control/                   # 任务调度（任务区 + 物料区）
+│   │   ├── robot_executor/                 # MoveIt2 执行封装
+│   │   ├── chassis_control/                # PS100 底盘驱动 + 站点服务
+│   │   └── bringup/                        # real/gazebo launch
+│   ├── ROS2_Teensy4.1烧录固件/             # Teensy 4.1 固件源码
+│   ├── Dockerfile / run_in_docker.sh       # 容器化（NVIDIA GPU）
+└── docs/（历史文档已凝练入本 README，2026-09 起移除）
 ```
 
 ---
 
-## 8. 版本与技术计划摘要
+## 11. 项目进度与里程碑
 
-### v1.0 — 基础任务系统（任务区）
+> 快照来源：《揭榜文档》v4（2026-08-13，含 8.7 节点数据）；仓库代码随后持续演进。
 
-- 三层架构：任务控制 → 动作执行 → 底层驱动。
-- 新增 `robot_interfaces`、`task_control`、`robot_executor`、`bringup` 四个 Package，复用已有 4 个底层 Package。
-- 单任务模式，唯一状态机位于 `MissionScheduler`。
-- 末端工具通过 `joint_6` 角度模拟（`toolOpen()` / `toolClose()`）。
-- 仿真验证：Task 1/2 左右放取全部通过（100%）。
+**模块状态总览**：见 [2.2 作业机构与模块清单](#22-作业机构与模块清单)。
 
-**当前完成状态**：
+**MVP 核心指标对标（8.7 节点）**：
 
-| 步骤 | 动作 | 状态 |
+| 指标 | 目标 | 状态 |
 |------|------|------|
-| 1 | Task 1 任务区（Home→A→task_pose→B→Home） | ✓ 已完成 |
-| 2 | Task 1 左放（material_id=1, L1） | ✓ 已完成 |
-| 3 | Task 1 右放（material_id=2, R1） | ✓ 已完成 |
-| 4 | Task 2 左取（material_id=1, L1） | ✓ 已完成 |
-| 5 | Task 2 右取（material_id=2, R1） | ✓ 已完成 |
+| PS100 伺服底盘定位 | 误差 ≤10mm，0-1000mm 精准移动 | ✅ 达标（实测误差 0.00mm） |
+| AR4 机械臂轨迹抓放 | 物料区抓放 80% 成功 | 🚧 接近目标（轨迹 + 固件闭环已通，待实车精调） |
+| 三腿 PID 自动调平 | 姿态高频 PID 动态倾角闭环 | 🚧 基本达标（微动归零 + 3000 脉冲预升，PID 调优中） |
+| K230 控制底盘/丝杆定位 | AprilTag 识别 + 近端减速微调 | 🚧 基本达标（链路完成，待实车标定） |
+| 上下游无线握手通信 | Wi-Fi 无线 Task1/2 全自动闭环 | ✅ 卡点化解（ESP8266 到货烧录，TCP :9100 通，L0~L3 实测通过） |
 
-### v1.1 — 移动底盘集成
-
-- 新增 `BaseExecutor`（底盘执行层）与 `base_controller` / `chassis_control` 包。
-- 任务流程扩展为三阶段：任务区取料 → 底盘移动 → 物料区放置（15 步）。
-- `ActionType` 扩展 `MoveBase`，`Step` 结构体扩展 `BaseTarget`。
-- `ExecuteTask.srv` / `Task.msg` 扩展 `material_position_id` 字段。
-- 底盘控制话题：`/base_controller/cmd_pos`、`/base_controller/pos`、`/base_controller/enable`、`/base_controller/stop`。
-- 左放/右放规则：v1.1 方案中**奇数 ID（1,3,5）为右放（R），偶数 ID（2,4,6）为左放（L）**。
-
-> ⚠️ **左右规则冲突**：AGENTS.md 中记录 `material_id=1` 为左放（L）、`material_id=2` 为右放（R），而其代码审查修复 H4 又注明"奇数=左放, 偶数=右放"，与 v1.1 方案（奇数=右放, 偶数=左放）相互矛盾。请以实际代码与真机验证结果为准。
-
-### 当前状态与下一步
-
-- 仿真验证 Task 1/2 全部通过。
-- 下一步：项目移植到香橙派（Orange Pi 5, Ubuntu ARM64）进行真机调试。
-- 移植步骤：烧录 Ubuntu 22.04 ARM64 → 安装 ROS2 Humble + MoveIt + ros2_control → `rsync` 同步代码 → `colcon build` 重新编译 → 连接 Teensy 真机调试。
-
-### V2.0 预留扩展方向（不纳入本期实施）
-
-| 扩展方向 | 接入方式 |
-|---------|---------|
-| 独立末端执行器（电动夹爪/真空吸盘/气动夹具/快换工具） | 替换 `RobotExecutor::toolOpen()` / `toolClose()` 内部实现 |
-| 视觉定位系统 | 新增 `VisionManager`，通过 `movePose()` 注入目标位姿 |
-| 多机械臂协同 | 多个 `RobotExecutor` 实例 + 多臂调度策略 |
-| Behavior Tree | 将 `executeTask()` 线性流程迁移至 BehaviorTree.CPP |
-| MES/ERP 对接（OPC UA / MQTT / REST API） | `TaskManager` 增加工业通信适配层 |
-| 闭环运动控制（启用编码器反馈） | 修改 Teensy 固件 + `ar_hardware_interface` |
-| 数字孪生（Gazebo / Isaac Sim） | 基于已有 `ar_gazebo` 扩展 |
-| AI 智能调度 | 新增 `TaskOptimizer`，注入 `MissionScheduler` |
+**总体完成度**：68%（2026-08-07 节点）；上游核心功能 100% 跑通。
 
 ---
 
-## 9. 协议与版权
+## 12. 协议与版权
 
-- 本项目代码版权归 **© 鄂尔多斯翔天飞宇** 所有（详见根目录 `LICENSE`），保留所有权利，仅供参考与学习使用，未经书面许可不得用于商业用途或再分发。
-- `ros2/src` 目录下包含上游 AR4 代码，遵循其自身的 **MIT License**（Copyright (c) 2021 Dexter Ong），详见 `ros2/src/LICENSE`。
-
----
-
-> 本 README 由原 `docs/` 目录下多份项目文档凝练而成（使用手册 / 架构方案 / 技术计划 / 真机调试 / 目录结构等）。具体行为以源码与 YAML 配置为准；文档与代码不一致处已在文中标注。
+- 本项目代码与文档版权归 **© 鄂尔多斯翔天飞宇** 所有（详见根目录 `LICENSE`），保留所有权利，仅供参考与学习研究，未经书面许可不得用于商业用途或再分发。
+- `ros2/src` 下含上游 AR4 开源代码，遵循其自身 **MIT License**（Copyright (c) 2021 Dexter Ong），详见 `ros2/src/LICENSE`。
+- 本 README 总体方案章节内容源自《揭榜文档_改装特种车全方案制定与上下游全链路实现》(v4, 2026-08-13)；技术细节与代码行为以本仓库源码及 YAML 配置为准。文档与代码不一致处已在文中标注或以代码为准。
